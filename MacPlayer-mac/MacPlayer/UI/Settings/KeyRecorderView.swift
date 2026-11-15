@@ -2,12 +2,15 @@ import SwiftUI
 import AppKit
 
 /// NSViewRepresentable that captures a single key press for rebinding shortcuts.
+/// Esc leaves the binding as it was.
 struct KeyRecorderView: NSViewRepresentable {
     let onKeyRecorded: (UInt16, NSEvent.ModifierFlags) -> Void
+    let onCancel: () -> Void
 
     func makeNSView(context: Context) -> KeyRecorderNSView {
         let view = KeyRecorderNSView()
         view.onKeyRecorded = onKeyRecorded
+        view.onCancel = onCancel
         return view
     }
 
@@ -17,6 +20,9 @@ struct KeyRecorderView: NSViewRepresentable {
 /// NSView that captures keyboard input for key binding configuration.
 final class KeyRecorderNSView: NSView {
     var onKeyRecorded: ((UInt16, NSEvent.ModifierFlags) -> Void)?
+    var onCancel: (() -> Void)?
+
+    private static let escapeKeyCode: UInt16 = 53
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -48,7 +54,10 @@ final class KeyRecorderNSView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        onKeyRecorded?(event.keyCode, modifiers)
+        if event.keyCode == Self.escapeKeyCode {
+            onCancel?()
+            return
+        }
+        onKeyRecorded?(event.keyCode, event.modifierFlags.shortcutModifiers)
     }
 }

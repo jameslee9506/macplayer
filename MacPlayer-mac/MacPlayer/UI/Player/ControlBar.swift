@@ -5,6 +5,8 @@ struct ControlBar: View {
     let engine: PlaybackEngine
     @Binding var sidebarTab: SidebarTab?
 
+    @AppStorage(AppSettings.controlBarOpacity.key) private var barOpacity = AppSettings.controlBarOpacity.defaultValue
+
     var body: some View {
         VStack(spacing: 8) {
             // Seek bar with A-B loop markers and thumbnail preview
@@ -129,8 +131,8 @@ struct ControlBar: View {
                     .accessibilityLabel("Track selection")
                 }
 
-                // Playlist indicator — only visible when playing from a playlist
-                if engine.playlist.currentIndex != nil && !engine.playlist.items.isEmpty {
+                // Playlist indicator — only visible when there is more to play than this one file
+                if engine.playlist.currentIndex != nil && engine.playlist.items.count > 1 {
                     Button(action: {
                         withAnimation(.easeInOut(duration: 0.25)) {
                             sidebarTab = sidebarTab == .playlist ? nil : .playlist
@@ -168,7 +170,7 @@ struct ControlBar: View {
         .padding(.vertical, 12)
         .background(
             LinearGradient(
-                colors: [.clear, .black.opacity(0.6), .black.opacity(0.8)],
+                colors: [.clear, .black.opacity(barOpacity * 0.75), .black.opacity(barOpacity)],
                 startPoint: .top,
                 endPoint: .bottom
             )

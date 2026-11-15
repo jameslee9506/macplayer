@@ -80,6 +80,12 @@ final class PlaybackEngine {
     /// for as long as that file stays loaded.
     private var scopedAccessURL: URL?
 
+    /// Bumped by every load(); a load that finds it changed after suspending was superseded.
+    private var loadGeneration = 0
+
+    /// Whether the seek bar is being dragged. The drag owns `currentTime` until it ends.
+    private var isScrubbing = false
+
     init() {
         self.decoder = MPVDecoder()
         self.keyBindings = KeyBindingManager()
@@ -95,9 +101,11 @@ final class PlaybackEngine {
         decoder.hdrManager = hdr
         decoder.trackManager = tracks
 
-        // Restore saved volume/mute
+        // Start at the default volume when asked to, otherwise where the last session left it
         let defaults = UserDefaults.standard
-        if defaults.object(forKey: "MacPlayer.volume") != nil {
+        if AppSettings.startAtDefaultVolume.value {
+            volume = Float(AppSettings.defaultVolume.value)
+        } else if defaults.object(forKey: "MacPlayer.volume") != nil {
             volume = defaults.float(forKey: "MacPlayer.volume")
         }
         isMuted = defaults.bool(forKey: "MacPlayer.isMuted")
@@ -128,13 +136,14 @@ final class PlaybackEngine {
             }
 
             if self.playlist.hasNext {
-                Task { await self.playNext() }
+                // A playlist plays through: the next item starts whatever "auto-play" says.
+                Task { await self.playNext(autoPlay: true) }
             } else {
                 self.isAtEnd = true
                 self.state = .paused
-                self.sleepPreventer.allowSleep()
-                self.nowPlaying.updatePlaybackState(isPlaying: false)
-                self.pip.updatePlayingState(false)
+                self.playbackStateDidChange()
+                // Played to the end: the file starts over next time instead of resuming.
+                self.savePlaybackState()
             }
         }
     }
@@ -145,10 +154,20 @@ final class PlaybackEngine {
         mpvTimeUpdateTimer?.invalidate()
         mpvTimeUpdateTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.state == .playing else { return }
+                guard let self, self.state.isActive else { return }
 
-                self.currentTime = self.decoder.currentTime
-                self.duration = self.decoder.duration
+                // Follow mpv while paused as well: a frame step or a keyframe seek moves the
+                // position without playback running. Assign only on change, so a player that
+                // sits paused invalidates nothing.
+                if !self.isSeeking, !self.isScrubbing, self.currentTime != self.decoder.currentTime {
+                    self.currentTime = self.decoder.currentTime
+                }
+                if self.duration != self.decoder.duration {
+                    self.duration = self.decoder.duration
+                }
+
+                guard self.state == .playing else { return }
+
                 self.nowPlaying.updateNowPlayingInfo(
                     title: self.mediaTitle,
                     currentTime: self.currentTime,
@@ -172,25 +191,22 @@ final class PlaybackEngine {
 
     // MARK: - Playback Control
 
-    func load(url: URL) async {
-        // Save settings of previous file
-        if let prevURL = currentURL {
-            if state.isActive {
-                history.recordPosition(
-                    videoURL: prevURL, title: mediaTitle,
-                    position: currentTime, duration: duration
-                )
-            }
-            savePerFileSettings(for: prevURL)
-        }
+    /// Loads a file and, when `autoPlay` is set, starts it. Left out, `autoPlay` follows Settings.
+    func load(url: URL, autoPlay: Bool = AppSettings.autoPlayOnOpen.value) async {
+        savePlaybackState()
 
         // Sandbox access held for a file reopened from the history ends once another file replaces it.
         if scopedAccessURL?.path != url.path {
             holdScopedAccess(nil)
         }
 
+        loadGeneration += 1
+        let generation = loadGeneration
+
         state = .loading
         currentURL = url
+        currentTime = 0
+        isAtEnd = false
         mediaTitle = url.deletingPathExtension().lastPathComponent
         mediaInfo = nil
         displayedImage = nil
@@ -205,12 +221,21 @@ final class PlaybackEngine {
         hdr.reset()
         tracks.reset()
 
+        // Without auto-play, hold mpv paused from the start so nothing plays before the first frame.
+        if !autoPlay {
+            decoder.pause()
+        }
+
         do {
             try await decoder.load(url: url)
+            // A newer load() took over while this one was waiting; the player is its to set up.
+            guard generation == loadGeneration else { return }
+
             history.recordOpened(videoURL: url, title: mediaTitle)
             // Re-apply volume/mute after decoder is loaded
             decoder.volume = volume
             decoder.isMuted = isMuted
+            currentTime = decoder.currentTime
             duration = decoder.duration
             playlist.updateCurrentDuration(duration)
 
@@ -218,7 +243,8 @@ final class PlaybackEngine {
             thumbnails.setup(url: url, duration: duration)
 
             // Check for resume position
-            if let resumePos = history.resumePosition(for: url), resumePos > 5 {
+            if AppSettings.resumePlayback.value,
+               let resumePos = history.resumePosition(for: url), resumePos > 5 {
                 state = .paused
                 await seek(to: resumePos)
                 osd.show(.text("Resumed at \(formatTime(resumePos))"))
@@ -241,28 +267,46 @@ final class PlaybackEngine {
                 mediaInfo?.modifiedAt = attrs[.modificationDate] as? Date
             }
             state = .paused
-            play()
+            if autoPlay {
+                play()
+            } else {
+                playbackStateDidChange()
+            }
         } catch {
+            // A superseded load fails with a cancellation; that is not an error to show.
+            guard generation == loadGeneration else { return }
             state = .error(error.localizedDescription)
+            playbackStateDidChange()
         }
+    }
+
+    /// Loads the current file again, after an attempt that failed.
+    func retryLoad() {
+        guard let url = currentURL else { return }
+        Task { await load(url: url) }
     }
 
     // MARK: - Image Viewing
 
     private func loadImage(url: URL) {
+        // The video before it, or one still loading, would otherwise play on under the image.
+        decoder.stop()
+
         guard let image = NSImage(contentsOf: url) else {
             state = .error("Failed to load image")
+            playbackStateDidChange()
             return
         }
         displayedImage = image
         duration = 0
         currentTime = 0
         state = .viewingImage
+        playbackStateDidChange()
         history.recordOpened(videoURL: url, title: mediaTitle)
     }
 
     func play() {
-        guard state == .paused || state == .stopped else { return }
+        guard state == .paused else { return }
 
         // If at the end, restart from beginning
         if isAtEnd {
@@ -278,9 +322,7 @@ final class PlaybackEngine {
                 }
             }
             state = .playing
-            sleepPreventer.preventSleep()
-            nowPlaying.updatePlaybackState(isPlaying: true)
-            pip.updatePlayingState(true)
+            playbackStateDidChange()
             return
         }
 
@@ -289,18 +331,16 @@ final class PlaybackEngine {
             decoder.setPlaybackRate(playbackRate)
         }
         state = .playing
-        sleepPreventer.preventSleep()
-        nowPlaying.updatePlaybackState(isPlaying: true)
-        pip.updatePlayingState(true)
+        playbackStateDidChange()
     }
 
     func pause() {
         guard state == .playing else { return }
         decoder.pause()
         state = .paused
-        sleepPreventer.allowSleep()
-        nowPlaying.updatePlaybackState(isPlaying: false)
-        pip.updatePlayingState(false)
+        playbackStateDidChange()
+        // A pause is often the last thing before the app goes away without a clean quit.
+        savePlaybackState()
     }
 
     func togglePlayPause() {
@@ -315,21 +355,63 @@ final class PlaybackEngine {
         }
     }
 
+    /// Unloads the current file and returns to the start screen.
     func stop() {
-        if let url = currentURL {
-            history.recordPosition(
-                videoURL: url, title: mediaTitle,
-                position: currentTime, duration: duration
-            )
-            savePerFileSettings(for: url)
-        }
+        savePlaybackState()
+        loadGeneration += 1
         decoder.stop()
+        if pip.isActive {
+            pip.togglePiP()
+        }
+        holdScopedAccess(nil)
+
         state = .stopped
+        currentURL = nil
+        mediaTitle = ""
+        mediaInfo = nil
+        displayedImage = nil
         currentTime = 0
-        sleepPreventer.allowSleep()
+        duration = 0
+        isAtEnd = false
+        playbackStateDidChange()
         nowPlaying.clearNowPlayingInfo()
-        nowPlaying.updatePlaybackState(isPlaying: false)
-        pip.teardown()
+    }
+
+    /// Brings sleep prevention, Now Playing and PiP in line with `state`.
+    private func playbackStateDidChange() {
+        let isPlaying = state == .playing
+        updateSleepPrevention()
+        nowPlaying.updatePlaybackState(isPlaying: isPlaying)
+        pip.updatePlayingState(isPlaying)
+    }
+
+    /// Keeps the display awake while a file plays, unless Settings turns that off.
+    /// Also called when the setting changes, so it applies to playback in progress.
+    func updateSleepPrevention() {
+        if state == .playing, AppSettings.preventSleep.value {
+            sleepPreventer.preventSleep()
+        } else {
+            sleepPreventer.allowSleep()
+        }
+    }
+
+    /// Switches VideoToolbox decoding on or off to match Settings, for the playing file too.
+    func applyHardwareDecodingSetting() {
+        decoder.setHardwareDecoding(AppSettings.hardwareDecoding.value)
+    }
+
+    /// Stores the resume position and the per-file adjustments of the file being played.
+    ///
+    /// Runs when the file is left, on every pause, and when the app quits. Only a file that
+    /// actually loaded has anything to store: while loading or after an error, the position
+    /// and the adjustments still belong to the file before it.
+    func savePlaybackState() {
+        guard let url = currentURL, state.isActive else { return }
+        history.recordPosition(
+            videoURL: url, title: mediaTitle,
+            position: currentTime, duration: duration
+        )
+        savePerFileSettings(for: url)
     }
 
     // MARK: - Seeking
@@ -358,6 +440,7 @@ final class PlaybackEngine {
     /// Called when drag begins — pauses playback so video doesn't advance during scrub.
     func scrubBegan() {
         guard state.isActive else { return }
+        isScrubbing = true
         wasPlayingBeforeScrub = (state == .playing)
         if wasPlayingBeforeScrub {
             decoder.pause()
@@ -374,6 +457,7 @@ final class PlaybackEngine {
 
     /// Called when drag ends — does precise seek then resumes playback if needed.
     func scrubEnded(at time: Double) {
+        isScrubbing = false
         guard state.isActive else { return }
         Task {
             await seek(to: time)
@@ -530,9 +614,9 @@ final class PlaybackEngine {
 
     // MARK: - Playlist Navigation
 
-    func playNext() async {
+    func playNext(autoPlay: Bool = AppSettings.autoPlayOnOpen.value) async {
         guard let url = playlist.next() else { return }
-        await load(url: url)
+        await load(url: url, autoPlay: autoPlay)
     }
 
     func playPrevious() async {
@@ -721,6 +805,7 @@ final class PlaybackEngine {
     }
 
     /// Opens one file, or a folder as a playlist starting at its first item.
+    /// A file opened on its own becomes the playlist, unless it is already in it.
     func open(_ url: URL) async {
         if PlaylistManager.isDirectory(url) {
             playlist.replace(folder: url)
@@ -728,6 +813,7 @@ final class PlaybackEngine {
                 await load(url: firstURL)
             }
         } else {
+            playlist.setCurrent(url)
             await load(url: url)
         }
     }
@@ -785,6 +871,7 @@ final class PlaybackEngine {
         }
 
         holdScopedAccess(hasScopedAccess ? scopedURL : nil)
+        playlist.setCurrent(url)
         await load(url: url)
         return true
     }

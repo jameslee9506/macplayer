@@ -77,7 +77,7 @@ final class MPVDecoder {
         checkError(mpv_set_option_string(ctx, "config", "no"))
         checkError(mpv_set_option_string(ctx, "input-default-bindings", "no"))
         checkError(mpv_set_option_string(ctx, "input-vo-keyboard", "no"))
-        checkError(mpv_set_option_string(ctx, "hwdec", "auto"))
+        checkError(mpv_set_option_string(ctx, "hwdec", AppSettings.hardwareDecoding.value ? "auto" : "no"))
         checkError(mpv_set_option_string(ctx, "osd-level", "0"))
         checkError(mpv_set_option_string(ctx, "keep-open", "yes"))
         checkError(mpv_set_option_string(ctx, "ytdl", "no"))
@@ -261,6 +261,8 @@ final class MPVDecoder {
         if mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &dur) >= 0 {
             duration = dur
         }
+        // Until the first time-pos event, currentTime would still be the previous file's.
+        currentTime = getMPVPropertyDouble("time-pos") ?? 0
     }
 
     func play() {
@@ -273,6 +275,12 @@ final class MPVDecoder {
 
     func stop() {
         guard let mpv else { return }
+
+        // A load still waiting for its file must not complete into a stopped player.
+        loadGeneration += 1
+        fileLoadContinuation?.resume(throwing: CancellationError())
+        fileLoadContinuation = nil
+
         let cmd = ["stop"]
         cmd.withCStrings { ptrs in
             var mutPtrs = ptrs
@@ -325,6 +333,12 @@ final class MPVDecoder {
 
     func setPlaybackRate(_ rate: Float) {
         self.rate = rate
+    }
+
+    /// Turns VideoToolbox decoding on or off. mpv reinitialises the video decoder at once,
+    /// so this also applies to a file that is already playing.
+    func setHardwareDecoding(_ enabled: Bool) {
+        setMPVString("hwdec", enabled ? "auto" : "no")
     }
 
     func stepForward() {

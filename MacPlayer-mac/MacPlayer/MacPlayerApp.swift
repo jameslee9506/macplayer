@@ -50,6 +50,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Quitting mid-file is the usual way to stop watching: keep the resume position.
+        engine.savePlaybackState()
         playerWindowController.teardown()
     }
 

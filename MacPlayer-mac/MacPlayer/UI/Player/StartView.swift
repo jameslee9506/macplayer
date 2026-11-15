@@ -134,7 +134,8 @@ struct StartView: View {
 // MARK: - Action Button Style
 
 /// Outlined rounded rectangle that brightens under the pointer.
-private struct StartActionButtonStyle: ButtonStyle {
+/// The error screen uses it too, for the same look on the same black background.
+struct StartActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         StartActionButtonBody(configuration: configuration)
     }

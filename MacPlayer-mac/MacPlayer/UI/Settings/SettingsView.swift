@@ -6,10 +6,10 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            GeneralSettingsView()
+            GeneralSettingsView(engine: engine)
                 .tabItem { Label("General", systemImage: "gear") }
 
-            PlaybackSettingsView()
+            PlaybackSettingsView(engine: engine)
                 .tabItem { Label("Playback", systemImage: "play.circle") }
 
             AppearanceSettingsView()
@@ -27,9 +27,11 @@ struct SettingsView: View {
 // MARK: - General Settings
 
 struct GeneralSettingsView: View {
-    @AppStorage("resumePlayback") private var resumePlayback = true
-    @AppStorage("autoPlayOnOpen") private var autoPlayOnOpen = true
-    @AppStorage("preventSleep") private var preventSleep = true
+    var engine: PlaybackEngine?
+
+    @AppStorage(AppSettings.resumePlayback.key) private var resumePlayback = AppSettings.resumePlayback.defaultValue
+    @AppStorage(AppSettings.autoPlayOnOpen.key) private var autoPlayOnOpen = AppSettings.autoPlayOnOpen.defaultValue
+    @AppStorage(AppSettings.preventSleep.key) private var preventSleep = AppSettings.preventSleep.defaultValue
 
     var body: some View {
         Form {
@@ -37,6 +39,8 @@ struct GeneralSettingsView: View {
                 Toggle("Resume playback from last position", isOn: $resumePlayback)
                 Toggle("Auto-play when opening a file", isOn: $autoPlayOnOpen)
                 Toggle("Prevent sleep during playback", isOn: $preventSleep)
+                    // Applies to the file that is playing right now, too.
+                    .onChange(of: preventSleep) { engine?.updateSleepPrevention() }
             }
         }
         .formStyle(.grouped)
@@ -47,14 +51,20 @@ struct GeneralSettingsView: View {
 // MARK: - Playback Settings
 
 struct PlaybackSettingsView: View {
-    @AppStorage("defaultVolume") private var defaultVolume: Double = 1.0
-    @AppStorage("seekSmallStep") private var seekSmallStep: Double = 5.0
-    @AppStorage("seekLargeStep") private var seekLargeStep: Double = 30.0
-    @AppStorage("hardwareDecoding") private var hardwareDecoding = true
+    var engine: PlaybackEngine?
+
+    @AppStorage(AppSettings.startAtDefaultVolume.key) private var startAtDefaultVolume = AppSettings.startAtDefaultVolume.defaultValue
+    @AppStorage(AppSettings.defaultVolume.key) private var defaultVolume = AppSettings.defaultVolume.defaultValue
+    @AppStorage(AppSettings.seekSmallStep.key) private var seekSmallStep = AppSettings.seekSmallStep.defaultValue
+    @AppStorage(AppSettings.seekLargeStep.key) private var seekLargeStep = AppSettings.seekLargeStep.defaultValue
+    @AppStorage(AppSettings.hardwareDecoding.key) private var hardwareDecoding = AppSettings.hardwareDecoding.defaultValue
 
     var body: some View {
         Form {
             Section("Audio") {
+                // Off, the player launches at the volume the last session ended with.
+                Toggle("Always start at the default volume", isOn: $startAtDefaultVolume)
+
                 HStack {
                     Text("Default Volume")
                     Slider(value: $defaultVolume, in: 0...1)
@@ -62,6 +72,7 @@ struct PlaybackSettingsView: View {
                         .monospacedDigit()
                         .frame(width: 40)
                 }
+                .disabled(!startAtDefaultVolume)
             }
 
             Section("Seeking") {
@@ -84,6 +95,8 @@ struct PlaybackSettingsView: View {
 
             Section("Decoding") {
                 Toggle("Hardware decoding (VideoToolbox)", isOn: $hardwareDecoding)
+                    // Applies to the file that is playing right now, too.
+                    .onChange(of: hardwareDecoding) { engine?.applyHardwareDecodingSetting() }
             }
         }
         .formStyle(.grouped)
@@ -94,9 +107,9 @@ struct PlaybackSettingsView: View {
 // MARK: - Appearance Settings
 
 struct AppearanceSettingsView: View {
-    @AppStorage("controlBarOpacity") private var controlBarOpacity: Double = 0.8
-    @AppStorage("controlsAutoHideDelay") private var controlsAutoHideDelay: Double = 3.0
-    @AppStorage("osdDuration") private var osdDuration: Double = 1.5
+    @AppStorage(AppSettings.controlBarOpacity.key) private var controlBarOpacity = AppSettings.controlBarOpacity.defaultValue
+    @AppStorage(AppSettings.controlsAutoHideDelay.key) private var controlsAutoHideDelay = AppSettings.controlsAutoHideDelay.defaultValue
+    @AppStorage(AppSettings.osdDuration.key) private var osdDuration = AppSettings.osdDuration.defaultValue
 
     var body: some View {
         Form {

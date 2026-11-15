@@ -16,14 +16,13 @@ final class PlayerWindowController: NSWindowController {
     private var singleClickTask: Task<Void, Never>?
     private var isTransitioningFullScreen = false
 
-    /// How long the controls stay up after the pointer stops moving during playback.
-    private static let controlsTimeout: Duration = .seconds(1.5)
     private static let minimumSize = NSSize(width: 480, height: 270)
     private static let defaultSize = NSSize(width: 960, height: 540)
 
     private static let escapeKeyCode: UInt16 = 53
-    /// ⌘1–⌘5 select a sidebar tab.
-    private static let sidebarTabKeyCodes: [UInt16: SidebarTab] = [
+    /// ⌘1–⌘5 select a sidebar tab. The window takes these ahead of the key bindings,
+    /// so `KeyBindingManager` refuses to bind an action to them.
+    static let sidebarTabKeyCodes: [UInt16: SidebarTab] = [
         18: .playlist, 19: .filters, 20: .info, 21: .bookmarks, 23: .tracks,
     ]
 
@@ -106,7 +105,7 @@ final class PlayerWindowController: NSWindowController {
 
         guard engine.state == .playing else { return }
         hideControlsTask = Task { [weak self] in
-            try? await Task.sleep(for: Self.controlsTimeout)
+            try? await Task.sleep(for: .seconds(AppSettings.controlsAutoHideDelay.value))
             guard !Task.isCancelled else { return }
             self?.hideControlsAfterTimeout()
         }
@@ -215,9 +214,7 @@ final class PlayerWindowController: NSWindowController {
             return false
         }
 
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            .subtracting([.numericPad, .function])
-        if modifiers == .command, let tab = Self.sidebarTabKeyCodes[event.keyCode] {
+        if event.modifierFlags.shortcutModifiers == .command, let tab = Self.sidebarTabKeyCodes[event.keyCode] {
             ui.sidebarTab = tab
             return true
         }

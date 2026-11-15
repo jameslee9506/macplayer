@@ -113,11 +113,14 @@ final class PlaybackHistoryManager {
         )
     }
 
-    /// Record or update playback position for a video.
+    /// Stores where playback of a file was left.
+    ///
+    /// A position in the first or the last five seconds leaves nothing to resume, so it is
+    /// stored as 0: a file played to its end starts over next time, rather than at whatever
+    /// point an earlier session happened to stop.
     func recordPosition(videoURL: URL, title: String, position: Double, duration: Double) {
-        // Only record if past 5 seconds and not near end
-        guard position > 5 && position < duration - 5 else { return }
-
+        let isResumable = position > 5 && position < duration - 5
+        let position = isResumable ? position : 0
         let now = Date()
 
         // UPSERT: insert or replace by video_url
@@ -134,7 +137,7 @@ final class PlaybackHistoryManager {
                 .real(now.timeIntervalSinceReferenceDate),
                 .text(videoURL.absoluteString)
             ])
-        } else {
+        } else if isResumable {
             let record = PlaybackRecord(
                 videoURL: videoURL, title: title, position: position, duration: duration
             )

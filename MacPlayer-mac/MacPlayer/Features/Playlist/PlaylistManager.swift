@@ -97,6 +97,17 @@ final class PlaylistManager {
         return items[index].url
     }
 
+    /// Makes `url` the current item. A file that is not in the playlist replaces it: the
+    /// playlist is the queue being played, and a file opened on its own starts a new one.
+    func setCurrent(_ url: URL) {
+        if let index = items.firstIndex(where: { $0.url == url }) {
+            currentIndex = index
+        } else {
+            replace(urls: [url])
+            currentIndex = 0
+        }
+    }
+
     func updateCurrentDuration(_ duration: Double) {
         guard let idx = currentIndex, items.indices.contains(idx) else { return }
         items[idx].duration = duration

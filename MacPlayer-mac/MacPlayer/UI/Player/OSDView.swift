@@ -94,7 +94,9 @@ final class OSDManager {
     var currentMessage: OSDMessage?
     private var dismissTask: Task<Void, Never>?
 
-    func show(_ message: OSDMessage, duration: TimeInterval = 1.5) {
+    /// Shows a message for `duration` seconds, or for the time set in Settings when left out.
+    func show(_ message: OSDMessage, duration: TimeInterval? = nil) {
+        let duration = duration ?? AppSettings.osdDuration.value
         dismissTask?.cancel()
         currentMessage = message
 

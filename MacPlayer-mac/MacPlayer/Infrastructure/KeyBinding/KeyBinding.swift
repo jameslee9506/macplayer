@@ -90,7 +90,7 @@ struct KeyBinding: Identifiable, Codable, Sendable {
     var modifiers: UInt  // Raw value of NSEvent.ModifierFlags
 
     var modifierFlags: NSEvent.ModifierFlags {
-        NSEvent.ModifierFlags(rawValue: modifiers)
+        NSEvent.ModifierFlags(rawValue: modifiers).shortcutModifiers
     }
 
     /// Human-readable description of the key combination.
@@ -139,6 +139,17 @@ struct KeyBinding: Identifiable, Codable, Sendable {
             KeyBinding(action: .markHighlightStart, keyCode: 4, modifiers: NSEvent.ModifierFlags.shift.rawValue),   // Shift+H
             KeyBinding(action: .markHighlightEnd, keyCode: 4, modifiers: NSEvent.ModifierFlags.option.rawValue),    // Option+H
         ]
+    }
+}
+
+extension NSEvent.ModifierFlags {
+    /// The modifiers that tell one shortcut from another: ⌘ ⌥ ⌃ ⇧.
+    ///
+    /// Everything else is dropped — Caps Lock, and the numeric-pad and function flags that
+    /// arrow and function keys carry on their own. Compare shortcuts through this on both
+    /// sides, or a binding stops matching whenever one of those flags happens to be set.
+    var shortcutModifiers: NSEvent.ModifierFlags {
+        intersection([.command, .option, .control, .shift])
     }
 }
 

@@ -4,9 +4,10 @@ import AppKit
 /// Uses a configurable [KeyBinding] array instead of hardcoded switch statements.
 /// Key presses are supplied by the player window (see `PlayerWindow`); this class only maps them to actions.
 @MainActor
+@Observable
 final class KeyBindingManager {
-    private weak var engine: PlaybackEngine?
-    private var lastSeekTime: CFAbsoluteTime = 0
+    @ObservationIgnored private weak var engine: PlaybackEngine?
+    @ObservationIgnored private var lastSeekTime: CFAbsoluteTime = 0
     private let seekRepeatInterval: CFAbsoluteTime = 0.1  // 100ms throttle for key repeat
 
     private(set) var bindings: [KeyBinding]
@@ -32,11 +33,29 @@ final class KeyBindingManager {
 
     // MARK: - Binding Management
 
-    func updateBinding(for action: PlayerAction, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
-        if let index = bindings.firstIndex(where: { $0.action == action }) {
-            bindings[index] = KeyBinding(action: action, keyCode: keyCode, modifiers: modifiers.rawValue)
+    /// Name of whatever already uses a key combination, other than `action` itself.
+    /// `nil` means `action` can take it.
+    func conflict(for action: PlayerAction, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> String? {
+        let modifiers = modifiers.shortcutModifiers
+        if modifiers == .command, PlayerWindowController.sidebarTabKeyCodes[keyCode] != nil {
+            return "Sidebar Tabs"
         }
+        return bindings.first {
+            $0.action != action && $0.keyCode == keyCode && $0.modifierFlags == modifiers
+        }?.action.displayName
+    }
+
+    /// Binds `action` to a key combination. Returns `false`, changing nothing, when the
+    /// combination is taken — two actions on one key would leave the second unreachable.
+    @discardableResult
+    func updateBinding(for action: PlayerAction, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> Bool {
+        guard conflict(for: action, keyCode: keyCode, modifiers: modifiers) == nil,
+              let index = bindings.firstIndex(where: { $0.action == action }) else { return false }
+        bindings[index] = KeyBinding(
+            action: action, keyCode: keyCode, modifiers: modifiers.shortcutModifiers.rawValue
+        )
         saveBindings()
+        return true
     }
 
     func resetToDefaults() {
@@ -56,9 +75,7 @@ final class KeyBindingManager {
     func handle(_ event: NSEvent) -> Bool {
         guard let engine else { return false }
 
-        // Strip .numericPad and .function — arrow keys and function keys set these automatically
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            .subtracting([.numericPad, .function])
+        let modifiers = event.modifierFlags.shortcutModifiers
 
         // Find matching binding
         guard let binding = bindings.first(where: {
@@ -86,20 +103,16 @@ final class KeyBindingManager {
             engine.togglePlayPause()
 
         case .seekForwardSmall:
-            let step = UserDefaults.standard.double(forKey: "seekSmallStep")
-            Task { await engine.seekRelative(by: step > 0 ? step : 5) }
+            Task { await engine.seekRelative(by: AppSettings.seekSmallStep.value) }
 
         case .seekBackwardSmall:
-            let step = UserDefaults.standard.double(forKey: "seekSmallStep")
-            Task { await engine.seekRelative(by: -(step > 0 ? step : 5)) }
+            Task { await engine.seekRelative(by: -AppSettings.seekSmallStep.value) }
 
         case .seekForwardLarge:
-            let step = UserDefaults.standard.double(forKey: "seekLargeStep")
-            Task { await engine.seekRelative(by: step > 0 ? step : 30) }
+            Task { await engine.seekRelative(by: AppSettings.seekLargeStep.value) }
 
         case .seekBackwardLarge:
-            let step = UserDefaults.standard.double(forKey: "seekLargeStep")
-            Task { await engine.seekRelative(by: -(step > 0 ? step : 30)) }
+            Task { await engine.seekRelative(by: -AppSettings.seekLargeStep.value) }
 
         case .volumeUp:
             engine.adjustVolume(by: 0.05)

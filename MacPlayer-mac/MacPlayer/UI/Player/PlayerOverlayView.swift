@@ -47,17 +47,44 @@ struct PlayerOverlayView: View {
                 imageView
 
             case .error(let message):
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.largeTitle)
-                        .foregroundStyle(.yellow)
-                    Text(message)
-                        .foregroundStyle(.white)
-                }
-                .allowsHitTesting(false)
+                errorView(message)
             }
         }
         .animation(.easeInOut(duration: 0.3), value: ui.showControls)
+    }
+
+    // MARK: - Error Screen
+
+    /// What went wrong, and the two ways out: load the file again, or go back to the start screen.
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: 18) {
+            // The message lets presses through, so the window can still be dragged by it.
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.largeTitle)
+                    .foregroundStyle(.yellow)
+                Text(message)
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+            }
+            .allowsHitTesting(false)
+
+            HStack(spacing: 10) {
+                errorAction("Try Again") { engine.retryLoad() }
+                errorAction("Close") { engine.stop() }
+            }
+        }
+        .padding(.horizontal, 24)
+    }
+
+    private func errorAction(_ title: LocalizedStringKey, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: .medium))
+                .padding(.horizontal, 13)
+                .frame(height: 34)
+        }
+        .buttonStyle(StartActionButtonStyle())
     }
 
     // MARK: - Title Overlay (top, next to traffic lights)
