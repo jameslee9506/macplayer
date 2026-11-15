@@ -2,9 +2,9 @@ import AppKit
 
 /// Manages keyboard shortcuts for player controls.
 /// Uses a configurable [KeyBinding] array instead of hardcoded switch statements.
+/// Key presses are supplied by the player window (see `PlayerWindow`); this class only maps them to actions.
 @MainActor
 final class KeyBindingManager {
-    nonisolated(unsafe) private var monitor: Any?
     private weak var engine: PlaybackEngine?
     private var lastSeekTime: CFAbsoluteTime = 0
     private let seekRepeatInterval: CFAbsoluteTime = 0.1  // 100ms throttle for key repeat
@@ -30,26 +30,6 @@ final class KeyBindingManager {
         self.engine = engine
     }
 
-    func start() {
-        guard monitor == nil else { return }
-
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, let engine = self.engine else { return event }
-
-            if self.handleKeyEvent(event, engine: engine) {
-                return nil // Event consumed
-            }
-            return event // Pass through
-        }
-    }
-
-    func stop() {
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
-        }
-        monitor = nil
-    }
-
     // MARK: - Binding Management
 
     func updateBinding(for action: PlayerAction, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
@@ -71,13 +51,10 @@ final class KeyBindingManager {
 
     // MARK: - Event Handling
 
-    private func handleKeyEvent(_ event: NSEvent, engine: PlaybackEngine) -> Bool {
-        // Only handle shortcuts when the player window is key
-        guard let keyWindow = NSApp.keyWindow,
-              keyWindow == NSApp.windows.first else { return false }
-
-        // Ignore key events when a text field is focused
-        if keyWindow.firstResponder is NSTextView { return false }
+    /// Runs the action bound to a key press in the player window.
+    /// Returns `true` when the event was consumed.
+    func handle(_ event: NSEvent) -> Bool {
+        guard let engine else { return false }
 
         // Strip .numericPad and .function — arrow keys and function keys set these automatically
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -99,11 +76,11 @@ final class KeyBindingManager {
             lastSeekTime = now
         }
 
-        executeAction(binding.action, engine: engine)
+        executeAction(binding.action, engine: engine, window: event.window)
         return true
     }
 
-    private func executeAction(_ action: PlayerAction, engine: PlaybackEngine) {
+    private func executeAction(_ action: PlayerAction, engine: PlaybackEngine, window: NSWindow?) {
         switch action {
         case .togglePlayPause:
             engine.togglePlayPause()
@@ -170,7 +147,7 @@ final class KeyBindingManager {
             engine.clearABLoop()
 
         case .toggleFullScreen:
-            NSApp.keyWindow?.toggleFullScreen(nil)
+            window?.toggleFullScreen(nil)
 
         case .rotateVideo:
             engine.rotateVideo()
@@ -201,12 +178,6 @@ final class KeyBindingManager {
 
         case .markHighlightEnd:
             engine.markHighlightEnd()
-        }
-    }
-
-    deinit {
-        if let monitor {
-            NSEvent.removeMonitor(monitor)
         }
     }
 }

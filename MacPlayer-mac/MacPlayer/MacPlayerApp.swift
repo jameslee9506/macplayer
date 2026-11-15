@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 import AppKit
 
 @main
@@ -7,10 +6,11 @@ struct MacPlayerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            PlayerView(engine: appDelegate.engine)
+        // The player window is owned by AppKit (PlayerWindowController).
+        // SwiftUI supplies the Settings window and the menu commands.
+        Settings {
+            SettingsView(engine: appDelegate.engine)
         }
-        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open...") {
@@ -21,121 +21,61 @@ struct MacPlayerApp: App {
 
             CommandGroup(after: .toolbar) {
                 Button("Toggle Full Screen") {
-                    NSApp.keyWindow?.toggleFullScreen(nil)
+                    appDelegate.playerWindowController.toggleFullScreen()
                 }
                 .keyboardShortcut("f")
             }
         }
-
-        Settings {
-            SettingsView(engine: appDelegate.engine)
-        }
     }
 }
 
-/// App delegate handles file association (double-click to open) and NSOpenPanel.
+/// App delegate owns the engine and the player window, and handles file association
+/// (double-click to open), the Dock menu, and the default-player prompt.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let engine = PlaybackEngine()
-    private var touchBarManager: TouchBarManager?
-    private var windowObservers: [NSObjectProtocol] = []
+
+    /// Created on first use — before any file is opened, so the video surface exists by then.
+    private(set) lazy var playerWindowController = PlayerWindowController(engine: engine)
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        _ = playerWindowController
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        configureMainWindow()
-        engine.setupKeyBindings()
-
-        // Setup Touch Bar
-        touchBarManager = TouchBarManager(engine: engine)
+        playerWindowController.showWindow(nil)
 
         // Prompt to set as default video player on first launch
         promptDefaultPlayerIfNeeded()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        touchBarManager?.teardown()
-        for observer in windowObservers {
-            NotificationCenter.default.removeObserver(observer)
+        playerWindowController.teardown()
+    }
+
+    /// Clicking the Dock icon brings back a player window that was closed.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            playerWindowController.showWindow(nil)
         }
+        return true
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
+        playerWindowController.showWindow(nil)
         Task {
             if urls.count == 1, let url = urls.first {
-                if PlaylistManager.isDirectory(url) {
-                    engine.playlist.replace(folder: url)
-                    if let firstURL = engine.playlist.play(at: 0) {
-                        await engine.load(url: firstURL)
-                    }
-                } else {
-                    await engine.load(url: url)
-                }
+                await engine.open(url)
             } else if urls.count > 1 {
-                let videoURLs = urls.filter { PlaylistManager.isVideoFile($0) || PlaylistManager.isDirectory($0) }
-                var allURLs: [URL] = []
-                for url in videoURLs {
-                    if PlaylistManager.isDirectory(url) {
-                        let temp = PlaylistManager()
-                        temp.add(folder: url)
-                        allURLs.append(contentsOf: temp.items.map(\.url))
-                    } else {
-                        allURLs.append(url)
-                    }
-                }
-                if !allURLs.isEmpty {
-                    engine.playlist.replace(urls: allURLs)
-                    if let firstURL = engine.playlist.play(at: 0) {
-                        await engine.load(url: firstURL)
-                    }
-                }
+                let playableURLs = urls.filter { PlaylistManager.isVideoFile($0) || PlaylistManager.isDirectory($0) }
+                await engine.openAsPlaylist(playableURLs)
             }
         }
     }
 
     func openFile() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [
-            .movie, .video, .mpeg4Movie, .quickTimeMovie, .avi,
-            .image, .png, .jpeg, .gif, .tiff, .heic, .bmp, .webP
-        ]
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = true
-
-        guard panel.runModal() == .OK else { return }
-
-        let urls = panel.urls
-        guard !urls.isEmpty else { return }
-
-        Task {
-            if urls.count == 1, let url = urls.first {
-                if PlaylistManager.isDirectory(url) {
-                    engine.playlist.replace(folder: url)
-                    if let firstURL = engine.playlist.play(at: 0) {
-                        await engine.load(url: firstURL)
-                    }
-                } else {
-                    // Single file: load directly (existing behavior)
-                    await engine.load(url: url)
-                }
-            } else {
-                // Multiple selections: build playlist
-                var allURLs: [URL] = []
-                for url in urls {
-                    if PlaylistManager.isDirectory(url) {
-                        let temp = PlaylistManager()
-                        temp.add(folder: url)
-                        allURLs.append(contentsOf: temp.items.map(\.url))
-                    } else {
-                        allURLs.append(url)
-                    }
-                }
-                if !allURLs.isEmpty {
-                    engine.playlist.replace(urls: allURLs)
-                    if let firstURL = engine.playlist.play(at: 0) {
-                        await engine.load(url: firstURL)
-                    }
-                }
-            }
-        }
+        playerWindowController.showWindow(nil)
+        engine.openFile()
     }
 
     // MARK: - Dock Menu
@@ -166,65 +106,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openRecentFile(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
+        playerWindowController.showWindow(nil)
         Task {
             await engine.load(url: url)
         }
-    }
-
-    // MARK: - Window Configuration
-
-    private func configureMainWindow() {
-        guard let window = NSApp.windows.first else { return }
-
-        // Set ourselves as window delegate for custom fullscreen animations
-        window.delegate = self
-
-        // IINA-style transparent titlebar
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.isMovableByWindowBackground = true
-        window.styleMask.insert(.fullSizeContentView)
-
-        // Window appearance
-        window.backgroundColor = .black
-        window.minSize = NSSize(width: 480, height: 270)
-
-        // Restore saved window frame
-        if let savedFrame = engine.windowState.loadSavedFrame() {
-            window.setFrame(savedFrame, display: true)
-        }
-
-        // Set Touch Bar on the window
-        if let tbManager = touchBarManager {
-            window.touchBar = tbManager.makeTouchBar()
-        }
-
-        // Observe window move/resize for auto-save (only save when not in fullscreen)
-        let moveObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didMoveNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self, !self.engine.windowState.isFullscreen,
-                  let window = self.mainWindow else { return }
-            self.engine.windowState.saveFrame(window.frame)
-        }
-        windowObservers.append(moveObserver)
-
-        let resizeObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.didResizeNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self, !self.engine.windowState.isFullscreen,
-                  let window = self.mainWindow else { return }
-            self.engine.windowState.saveFrame(window.frame)
-        }
-        windowObservers.append(resizeObserver)
-    }
-
-    private var mainWindow: NSWindow? {
-        NSApp.windows.first
     }
 
     // MARK: - Default Player Prompt
@@ -275,61 +160,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 bundleID as CFString
             )
         }
-    }
-}
-
-// MARK: - Custom Fullscreen Animation (like IINA)
-
-extension AppDelegate: NSWindowDelegate {
-
-    // Tell AppKit we handle fullscreen animation ourselves — prevents bitmap snapshot zoom
-    func customWindowsToEnterFullScreen(for window: NSWindow) -> [NSWindow]? {
-        [window]
-    }
-
-    func customWindowsToExitFullScreen(for window: NSWindow) -> [NSWindow]? {
-        [window]
-    }
-
-    // Smooth enter: animate window frame to fill screen
-    func window(_ window: NSWindow, startCustomAnimationToEnterFullScreenOn screen: NSScreen, withDuration duration: TimeInterval) {
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = duration
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            window.animator().setFrame(screen.frame, display: true, animate: true)
-        }
-    }
-
-    // Smooth exit: animate window frame back to prior windowed size
-    func window(_ window: NSWindow, startCustomAnimationToExitFullScreenWithDuration duration: TimeInterval) {
-        let targetFrame = engine.windowState.priorWindowedFrame
-            ?? engine.windowState.loadSavedFrame()
-            ?? NSRect(x: 200, y: 200, width: 1280, height: 720)
-
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = duration
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            window.animator().setFrame(targetFrame, display: true, animate: true)
-        }
-    }
-
-    func windowWillEnterFullScreen(_ notification: Notification) {
-        // Save windowed frame before entering fullscreen
-        if let window = notification.object as? NSWindow {
-            engine.windowState.priorWindowedFrame = window.frame
-        }
-        engine.windowState.isFullscreen = true
-    }
-
-    func windowDidEnterFullScreen(_ notification: Notification) {
-        // isFullscreen already set in willEnter
-    }
-
-    func windowWillExitFullScreen(_ notification: Notification) {
-        // Animation about to start
-    }
-
-    func windowDidExitFullScreen(_ notification: Notification) {
-        engine.windowState.isFullscreen = false
     }
 }

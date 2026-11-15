@@ -1,18 +1,7 @@
-import SwiftUI
 import AppKit
 
-/// SwiftUI wrapper for the mpv OpenGL video rendering surface.
-struct MPVVideoView: NSViewRepresentable {
-    let engine: PlaybackEngine
-
-    func makeNSView(context: Context) -> MPVVideoNSView {
-        MPVVideoNSView(engine: engine)
-    }
-
-    func updateNSView(_ nsView: MPVVideoNSView, context: Context) {}
-}
-
 /// NSView hosting an MPVVideoLayer for mpv OpenGL rendering.
+/// Mounted directly in the player window by `PlayerContentView`.
 final class MPVVideoNSView: NSView {
     private let engine: PlaybackEngine
     private var videoLayer: MPVVideoLayer?
@@ -59,7 +48,7 @@ final class MPVVideoNSView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // Always pass clicks through — SwiftUI handles all interaction
+        // Always pass clicks through — the overlay stacked above handles all interaction
         nil
     }
 

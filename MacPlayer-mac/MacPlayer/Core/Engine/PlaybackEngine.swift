@@ -87,6 +87,7 @@ final class PlaybackEngine {
         self.highlights = HighlightManager()
         self.perFileStore = PerFileSettingsStore()
         nowPlaying.setup(engine: self)
+        keyBindings.setup(engine: self)
         decoder.hdrManager = hdr
         decoder.trackManager = tracks
 
@@ -163,12 +164,6 @@ final class PlaybackEngine {
                 }
             }
         }
-    }
-
-    /// Post-init setup that requires self to be fully initialized
-    func setupKeyBindings() {
-        keyBindings.setup(engine: self)
-        keyBindings.start()
     }
 
     // MARK: - Playback Control
@@ -694,36 +689,49 @@ final class PlaybackEngine {
         guard panel.runModal() == .OK else { return }
 
         let urls = panel.urls
-        guard !urls.isEmpty else { return }
-
         Task {
-            if urls.count == 1, let url = urls.first {
-                if PlaylistManager.isDirectory(url) {
-                    playlist.replace(folder: url)
-                    if let firstURL = playlist.play(at: 0) {
-                        await load(url: firstURL)
-                    }
-                } else {
-                    await load(url: url)
-                }
-            } else {
-                var allURLs: [URL] = []
-                for url in urls {
-                    if PlaylistManager.isDirectory(url) {
-                        let temp = PlaylistManager()
-                        temp.add(folder: url)
-                        allURLs.append(contentsOf: temp.items.map(\.url))
-                    } else {
-                        allURLs.append(url)
-                    }
-                }
-                if !allURLs.isEmpty {
-                    playlist.replace(urls: allURLs)
-                    if let firstURL = playlist.play(at: 0) {
-                        await load(url: firstURL)
-                    }
-                }
+            await open(urls: urls)
+        }
+    }
+
+    /// Opens a selection of files or folders: one item plays directly, several become a playlist.
+    func open(urls: [URL]) async {
+        if urls.count == 1, let url = urls.first {
+            await open(url)
+        } else if urls.count > 1 {
+            await openAsPlaylist(urls)
+        }
+    }
+
+    /// Opens one file, or a folder as a playlist starting at its first item.
+    func open(_ url: URL) async {
+        if PlaylistManager.isDirectory(url) {
+            playlist.replace(folder: url)
+            if let firstURL = playlist.play(at: 0) {
+                await load(url: firstURL)
             }
+        } else {
+            await load(url: url)
+        }
+    }
+
+    /// Replaces the playlist with the given items (folders are expanded) and plays the first one.
+    func openAsPlaylist(_ urls: [URL]) async {
+        var allURLs: [URL] = []
+        for url in urls {
+            if PlaylistManager.isDirectory(url) {
+                let temp = PlaylistManager()
+                temp.add(folder: url)
+                allURLs.append(contentsOf: temp.items.map(\.url))
+            } else {
+                allURLs.append(url)
+            }
+        }
+        guard !allURLs.isEmpty else { return }
+
+        playlist.replace(urls: allURLs)
+        if let firstURL = playlist.play(at: 0) {
+            await load(url: firstURL)
         }
     }
 

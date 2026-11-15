@@ -173,7 +173,6 @@ struct ControlBar: View {
                 endPoint: .bottom
             )
         )
-        .background(NonDraggableArea())
     }
 
     private var currentBookmarkTimes: [Double] {
@@ -220,16 +219,4 @@ private struct PlayerControlButtonBody: View {
             .animation(.easeOut(duration: 0.15), value: isHovered)
             .onHover { isHovered = $0 }
     }
-}
-
-/// Prevents window drag in the control bar area when isMovableByWindowBackground is true.
-struct NonDraggableArea: NSViewRepresentable {
-    func makeNSView(context: Context) -> NonDraggableNSView {
-        NonDraggableNSView()
-    }
-    func updateNSView(_ nsView: NonDraggableNSView, context: Context) {}
-}
-
-final class NonDraggableNSView: NSView {
-    override var mouseDownCanMoveWindow: Bool { false }
 }

@@ -71,7 +71,7 @@ MacPlayer/
 ├── Core/
 │   ├── Engine/          # MPVDecoder, PlaybackEngine
 │   ├── Model/           # PlayerState, MediaInfo, WindowState, PerFileSettings
-│   └── Renderer/        # MPVVideoLayer (CAOpenGLLayer), MPVVideoView (SwiftUI), ScreenshotCapture
+│   └── Renderer/        # MPVVideoLayer (CAOpenGLLayer), MPVVideoNSView, ScreenshotCapture
 ├── Features/
 │   ├── Bookmark/        # Timestamp bookmarks with thumbnails
 │   ├── Filter/          # Video filter pipeline (brightness, contrast, etc.)
@@ -87,9 +87,10 @@ MacPlayer/
 │   └── SystemIntegration/  # Now Playing, Touch Bar, sleep prevention
 ├── UI/
 │   ├── Components/      # SeekBar, VolumeSlider, ThumbnailPreview, OSD, etc.
-│   ├── Player/          # PlayerView, ControlBar
+│   ├── Player/          # PlayerOverlayView, ControlBar, PlayerUIState
 │   ├── Settings/        # Settings views, key binding editor
-│   └── Sidebar/         # Playlist sidebar
+│   ├── Sidebar/         # Playlist sidebar
+│   └── Window/          # AppKit window layer: window controller, content view, input handling
 └── deps/                # Bundled mpv headers and dylibs (not compiled)
 ```
 
@@ -138,7 +139,7 @@ All shortcuts are fully customizable in Settings.
 | Component | Technology |
 |---|---|
 | Language | Swift 6 (strict concurrency) |
-| UI Framework | SwiftUI |
+| UI Framework | AppKit (window, input) + SwiftUI (controls) |
 | Video Backend | mpv / libmpv |
 | GPU Rendering | OpenGL (CAOpenGLLayer via mpv render API) |
 | Database | SQLite |

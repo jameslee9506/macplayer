@@ -143,6 +143,9 @@ enum SidebarTab: Hashable {
 /// Tabbed sidebar panel that slides in from the right.
 /// Contains playlist and filter/adjustments tabs.
 struct SidePanel: View {
+    /// Panel width. `PlayerContentView` reserves exactly this much beside the video.
+    static let width: CGFloat = 280
+
     let engine: PlaybackEngine
     @Binding var selectedTab: SidebarTab?
 
@@ -172,10 +175,9 @@ struct SidePanel: View {
             }
         }
         .ignoresSafeArea()
-        .frame(width: 280)
+        .frame(width: Self.width)
         .background(.black.opacity(0.85))
         .background(.ultraThinMaterial)
-        .background(NonDraggableArea())
         .preferredColorScheme(.dark)
     }
 
