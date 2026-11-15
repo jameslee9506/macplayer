@@ -20,18 +20,6 @@ open MacPlayer.xcodeproj
 
 Select the **MacPlayer** scheme in Xcode and run it. The bundling script prepares the required headers and libraries locally. See the [app README](MacPlayer-mac/README.md) for architecture and keyboard shortcuts.
 
-## Website
-
-The `web/` directory contains the React Router website.
-
-```sh
-cd web
-npm ci
-npm run dev
-```
-
-Run `npm run typecheck` and `npm run build` to validate the website. Downloads link to [GitHub releases](https://github.com/jameslee9506/macplayer/releases); build from source until a MacPlayer binary is published. Configure your own site domain and explicit `CLOUDFLARE_ACCOUNT_ID` before deploying.
-
 ## License
 
 See [LICENSE](LICENSE). MacPlayer uses [mpv](https://mpv.io/) and [FFmpeg](https://ffmpeg.org/), and takes inspiration from [IINA](https://iina.io/).
