@@ -18,6 +18,8 @@ struct MediaIdentity: Sendable {
 ///   row takes the new path.
 /// - A path whose content was replaced gets a new media row; the old row loses its path and
 ///   keeps its data for when that content turns up elsewhere.
+/// - A file still being written (a download in progress) changes fingerprint as it grows. It
+///   stays the same media as long as it keeps its path and its first bytes and does not shrink.
 /// - Rows created before fingerprints existed have none. They get one the first time their
 ///   file is opened, at the path they were recorded under.
 @MainActor
@@ -25,8 +27,16 @@ final class MediaIdentityStore {
     private struct Row {
         let id: String
         let fingerprint: String?
+        let headHash: String?
         let size: Int64?
         let mtime: Double?
+
+        /// Whether a file with `fingerprint` and `size` is this row's file, written further:
+        /// same first bytes, and no smaller.
+        func isEarlierState(of fingerprint: MediaFingerprint, size: Int64?) -> Bool {
+            guard let headHash, let oldSize = self.size, let size else { return false }
+            return headHash == fingerprint.head && size >= oldSize
+        }
     }
 
     private var db: SQLiteDatabase { DatabaseManager.shared.db }
@@ -36,6 +46,8 @@ final class MediaIdentityStore {
     /// `expectedID` is the media the caller believes the file to be: a recent file reopened
     /// through its bookmark, which follows a move. It only matters while that row has no
     /// fingerprint yet, and then lets the row follow the file to its new path.
+    ///
+    /// Called again for a file that has grown since, it returns the same media.
     func identify(_ url: URL, expecting expectedID: String? = nil) async -> MediaIdentity {
         let path = url.path
         let attributes = try? FileManager.default.attributesOfItem(atPath: path)
@@ -43,7 +55,7 @@ final class MediaIdentityStore {
         let mtime = (attributes?[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate
 
         // Unchanged since it was last identified here: no need to read it.
-        if let known = row(atPath: path), known.fingerprint != nil,
+        if let known = row(atPath: path), known.fingerprint != nil, known.headHash != nil,
            let size, let mtime, known.size == size, known.mtime == mtime {
             let didMerge = merge(unfingerprinted(expectedID, otherThan: known.id), into: known.id)
             return MediaIdentity(id: known.id, didMerge: didMerge)
@@ -66,24 +78,28 @@ final class MediaIdentityStore {
             return MediaIdentity(id: id, didMerge: false)
         }
 
-        // Rows without a fingerprint that describe this very file: the one recorded at this
-        // path and the one the caller expected.
-        var legacy: [Row] = []
-        if let atPath, atPath.fingerprint == nil { legacy.append(atPath) }
-        if let expected = unfingerprinted(expectedID, otherThan: legacy.first?.id) { legacy.append(expected) }
+        // Rows that describe this very file without carrying its fingerprint: the one at this
+        // path, when it was recorded before fingerprints or when the file has been written
+        // further since, and the unfingerprinted one the caller expected.
+        var earlier: [Row] = []
+        if let atPath, atPath.fingerprint == nil || atPath.isEarlierState(of: fingerprint, size: size) {
+            earlier.append(atPath)
+        }
+        if let expected = unfingerprinted(expectedID, otherThan: earlier.first?.id) { earlier.append(expected) }
 
         let id: String
         var didMerge = false
-        if let known = row(withFingerprint: fingerprint) {
+        if let known = row(withFingerprint: fingerprint.content) {
             // Known content, possibly at a new path.
             id = known.id
-            for row in legacy {
+            for row in earlier {
                 didMerge = merge(row, into: id) || didMerge
             }
-        } else if let adopted = legacy.first {
-            // First read of a file recorded before fingerprints: the row becomes its identity.
+        } else if let adopted = earlier.first {
+            // The row becomes this content's identity: its file was read for the first time,
+            // or has grown.
             id = adopted.id
-            for row in legacy.dropFirst() {
+            for row in earlier.dropFirst() {
                 didMerge = merge(row, into: id) || didMerge
             }
         } else {
@@ -125,13 +141,14 @@ final class MediaIdentityStore {
 
     private func row(where condition: String, _ value: SQLiteValue) -> Row? {
         let rows = try? db.query(
-            "SELECT id, fingerprint, size, mtime FROM media WHERE \(condition) LIMIT 1",
+            "SELECT id, fingerprint, head_hash, size, mtime FROM media WHERE \(condition) LIMIT 1",
             parameters: [value]
         )
         guard let row = rows?.first, let id = row["id"]?.textValue else { return nil }
         return Row(
             id: id,
             fingerprint: row["fingerprint"]?.textValue,
+            headHash: row["head_hash"]?.textValue,
             size: row["size"]?.integerValue,
             mtime: row["mtime"]?.realValue
         )
@@ -144,11 +161,12 @@ final class MediaIdentityStore {
         return id
     }
 
-    private func update(_ id: String, fingerprint: String?, size: Int64?, mtime: Double?, path: String?) {
+    private func update(_ id: String, fingerprint: MediaFingerprint?, size: Int64?, mtime: Double?, path: String?) {
         try? db.execute("""
-            UPDATE media SET fingerprint = ?, size = ?, mtime = ?, path = ? WHERE id = ?
+            UPDATE media SET fingerprint = ?, head_hash = ?, size = ?, mtime = ?, path = ? WHERE id = ?
         """, parameters: [
-            fingerprint.map { .text($0) } ?? .null,
+            fingerprint.map { .text($0.content) } ?? .null,
+            fingerprint.map { .text($0.head) } ?? .null,
             size.map { .integer($0) } ?? .null,
             mtime.map { .real($0) } ?? .null,
             path.map { .text($0) } ?? .null,

@@ -40,19 +40,27 @@ final class DatabaseManager {
             )
         """)
 
-        // `fingerprint` is NULL until the file is first read. `path` is where the content was
+        // `fingerprint` is NULL until the file is first read. `head_hash` covers its first
+        // bytes only, to recognise a file that is still growing. `path` is where the content was
         // last seen, NULL once other content took that path. `bookmark` is the security-scoped
         // bookmark that lets the sandbox reopen the file in a later launch.
         try db.execute("""
             CREATE TABLE IF NOT EXISTS media (
                 id TEXT PRIMARY KEY,
                 fingerprint TEXT UNIQUE,
+                head_hash TEXT,
                 size INTEGER,
                 mtime REAL,
                 path TEXT,
                 bookmark BLOB
             )
         """)
+
+        // Added later: filled in the next time the file is read.
+        let mediaColumns = try db.query("PRAGMA table_info(media)")
+        if !mediaColumns.contains(where: { $0["name"]?.textValue == "head_hash" }) {
+            try db.execute("ALTER TABLE media ADD COLUMN head_hash TEXT")
+        }
 
         try db.execute("""
             CREATE INDEX IF NOT EXISTS idx_media_path ON media(path)
