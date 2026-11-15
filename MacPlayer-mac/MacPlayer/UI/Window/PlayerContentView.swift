@@ -94,6 +94,11 @@ final class PlayerContentView: NSView {
 
     // MARK: - Sidebar
 
+    private static let sidebarSlideDuration: TimeInterval = 0.3
+    /// Ease-out: leaves fast, settles slowly. Opening and closing both run this same curve
+    /// rather than closing with its mirror image.
+    private static let sidebarSlideCurve = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
+
     /// Slides the sidebar in or out. The video region resizes with it, frame by frame.
     func setSidebarVisible(_ visible: Bool, animated: Bool) {
         if visible, sidebarView == nil { installSidebar() }
@@ -104,8 +109,8 @@ final class PlayerContentView: NSView {
         Task {
             // Going through the animator even when not animating cancels a slide already in flight.
             await NSAnimationContext.runAnimationGroup { context in
-                context.duration = animated ? 0.25 : 0
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                context.duration = animated ? Self.sidebarSlideDuration : 0
+                context.timingFunction = Self.sidebarSlideCurve
                 surfaceTrailing.animator().constant = trailing
             }
             // Unmount only after the latest slide-out; a newer toggle owns the sidebar otherwise.
