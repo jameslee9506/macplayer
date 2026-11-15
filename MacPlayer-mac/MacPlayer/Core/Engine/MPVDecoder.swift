@@ -52,6 +52,9 @@ final class MPVDecoder {
     /// Continuation for awaiting FILE_LOADED event during load()
     private var fileLoadContinuation: CheckedContinuation<Void, any Error>?
 
+    /// Bumped by every load(); a call that finds it changed after suspending was superseded
+    private var loadGeneration = 0
+
     // MARK: - Initialization
 
     init() {
@@ -207,22 +210,38 @@ final class MPVDecoder {
     // MARK: - Playback Control
 
     func load(url: URL) async throws {
-        guard let mpv else { throw MPVError.notInitialized }
-
         let loadStart = CFAbsoluteTimeGetCurrent()
+        let path = url.path
+
+        // Probe the container layout off the main actor — on a disk that has spun down,
+        // even these few header reads can take seconds.
+        loadGeneration += 1
+        let generation = loadGeneration
+        let hasSplitMdat = await Task.detached(priority: .userInitiated) {
+            macplayer_mp4_has_split_mdat(path) != 0
+        }.value
+        // A newer load() started while we were probing; let that one win.
+        guard generation == loadGeneration else { throw CancellationError() }
+
+        guard let mpv else { throw MPVError.notInitialized }
 
         // Cancel any pending load
         fileLoadContinuation?.resume(throwing: CancellationError())
         fileLoadContinuation = nil
 
-        let path = url.path
+        var cmd = ["loadfile", path]
+        if hasSplitMdat {
+            // moov already indexes every sample. Without this, lavf walks every remaining
+            // top-level box before the file opens — seconds on a hard disk. With it, those
+            // boxes are read only as playback or a seek reaches them. Per-file option.
+            cmd += ["replace", "-1", "index=recreate"]
+        }
 
         // Wait for FILE_LOADED event instead of arbitrary sleep
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             self.fileLoadContinuation = continuation
 
             let cmdStart = CFAbsoluteTimeGetCurrent()
-            let cmd = ["loadfile", path]
             let result = cmd.withCStrings { ptrs in
                 var mutPtrs = ptrs
                 return mpv_command(mpv, &mutPtrs)

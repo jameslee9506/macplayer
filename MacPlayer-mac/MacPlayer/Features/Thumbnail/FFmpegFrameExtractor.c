@@ -1,80 +1,113 @@
 #include "FFmpegFrameExtractor.h"
 
+#include "../../Core/Engine/MP4LayoutProbe.h"
+
+#include <stdlib.h>
+
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
-#include <libavutil/imgutils.h>
 
-MacPlayerFrameResult macplayer_extract_frame(const char *path, double timeSec, int maxWidth) {
-    MacPlayerFrameResult result = { .pixels = NULL, .width = 0, .height = 0 };
+struct MacPlayerFrameExtractor {
+    AVFormatContext *fmtCtx;
+    AVCodecContext *codecCtx;
+    struct SwsContext *swsCtx;   // cached across frames; rebuilt if the frame geometry changes
+    AVFrame *frame;
+    AVPacket *pkt;
+    int videoIdx;
+};
 
-    AVFormatContext *fmtCtx = NULL;
-    AVCodecContext *codecCtx = NULL;
-    struct SwsContext *swsCtx = NULL;
-    AVFrame *frame = NULL;
-    AVFrame *rgbaFrame = NULL;
-    AVPacket *pkt = NULL;
-    uint8_t *rgbaBuf = NULL;
+MacPlayerFrameExtractor *macplayer_frame_extractor_open(const char *path) {
+    MacPlayerFrameExtractor *ex = calloc(1, sizeof(*ex));
+    if (!ex)
+        return NULL;
 
-    // Open input
-    if (avformat_open_input(&fmtCtx, path, NULL, NULL) < 0)
-        goto cleanup;
-    if (avformat_find_stream_info(fmtCtx, NULL) < 0)
-        goto cleanup;
+    ex->fmtCtx = avformat_alloc_context();
+    if (!ex->fmtCtx)
+        goto fail;
+    // Split-mdat MP4: moov already indexes every sample, so don't walk the rest of the
+    // file's top-level boxes on open (see MP4LayoutProbe.h).
+    if (macplayer_mp4_has_split_mdat(path))
+        ex->fmtCtx->flags |= AVFMT_FLAG_IGNIDX;
 
-    // Find best video stream
-    int videoIdx = av_find_best_stream(fmtCtx, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    if (videoIdx < 0)
-        goto cleanup;
+    // On failure avformat_open_input frees the context and sets it to NULL.
+    if (avformat_open_input(&ex->fmtCtx, path, NULL, NULL) < 0)
+        goto fail;
+    if (avformat_find_stream_info(ex->fmtCtx, NULL) < 0)
+        goto fail;
 
-    AVStream *stream = fmtCtx->streams[videoIdx];
+    ex->videoIdx = av_find_best_stream(ex->fmtCtx, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+    if (ex->videoIdx < 0)
+        goto fail;
+
+    AVStream *stream = ex->fmtCtx->streams[ex->videoIdx];
     const AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
     if (!codec)
-        goto cleanup;
+        goto fail;
 
-    codecCtx = avcodec_alloc_context3(codec);
-    if (!codecCtx)
-        goto cleanup;
-    if (avcodec_parameters_to_context(codecCtx, stream->codecpar) < 0)
-        goto cleanup;
-    if (avcodec_open2(codecCtx, codec, NULL) < 0)
-        goto cleanup;
+    ex->codecCtx = avcodec_alloc_context3(codec);
+    if (!ex->codecCtx)
+        goto fail;
+    if (avcodec_parameters_to_context(ex->codecCtx, stream->codecpar) < 0)
+        goto fail;
+    if (avcodec_open2(ex->codecCtx, codec, NULL) < 0)
+        goto fail;
 
-    // Seek
+    ex->frame = av_frame_alloc();
+    ex->pkt = av_packet_alloc();
+    if (!ex->frame || !ex->pkt)
+        goto fail;
+
+    return ex;
+
+fail:
+    macplayer_frame_extractor_close(ex);
+    return NULL;
+}
+
+void macplayer_frame_extractor_close(MacPlayerFrameExtractor *ex) {
+    if (!ex)
+        return;
+    if (ex->frame)      av_frame_free(&ex->frame);
+    if (ex->pkt)        av_packet_free(&ex->pkt);
+    if (ex->swsCtx)     sws_freeContext(ex->swsCtx);
+    if (ex->codecCtx)   avcodec_free_context(&ex->codecCtx);
+    if (ex->fmtCtx)     avformat_close_input(&ex->fmtCtx);
+    free(ex);
+}
+
+/// Seek to the keyframe at or before `timeSec` and decode it into `ex->frame`.
+static int decodeFrameAt(MacPlayerFrameExtractor *ex, double timeSec) {
     int64_t ts = (int64_t)(timeSec * AV_TIME_BASE);
-    av_seek_frame(fmtCtx, -1, ts, AVSEEK_FLAG_BACKWARD);
-    avcodec_flush_buffers(codecCtx);
+    av_seek_frame(ex->fmtCtx, -1, ts, AVSEEK_FLAG_BACKWARD);
+    // Also takes the decoder out of the drained state a previous call may have left it in.
+    avcodec_flush_buffers(ex->codecCtx);
 
-    // Decode one frame
-    frame = av_frame_alloc();
-    pkt = av_packet_alloc();
-    if (!frame || !pkt)
-        goto cleanup;
-
-    int gotFrame = 0;
-    while (av_read_frame(fmtCtx, pkt) >= 0) {
-        if (pkt->stream_index != videoIdx) {
-            av_packet_unref(pkt);
+    while (av_read_frame(ex->fmtCtx, ex->pkt) >= 0) {
+        if (ex->pkt->stream_index != ex->videoIdx) {
+            av_packet_unref(ex->pkt);
             continue;
         }
-        if (avcodec_send_packet(codecCtx, pkt) < 0) {
-            av_packet_unref(pkt);
+        int sent = avcodec_send_packet(ex->codecCtx, ex->pkt);
+        av_packet_unref(ex->pkt);
+        if (sent < 0)
             continue;
-        }
-        av_packet_unref(pkt);
-
-        if (avcodec_receive_frame(codecCtx, frame) == 0) {
-            gotFrame = 1;
-            break;
-        }
+        if (avcodec_receive_frame(ex->codecCtx, ex->frame) == 0)
+            return 1;
     }
 
-    // Flush decoder if we haven't got a frame yet
-    if (!gotFrame) {
-        avcodec_send_packet(codecCtx, NULL);
-        if (avcodec_receive_frame(codecCtx, frame) != 0)
-            goto cleanup;
-    }
+    // Ran out of packets: drain whatever the decoder is still holding.
+    avcodec_send_packet(ex->codecCtx, NULL);
+    return avcodec_receive_frame(ex->codecCtx, ex->frame) == 0;
+}
+
+MacPlayerFrameResult macplayer_frame_extractor_extract(MacPlayerFrameExtractor *ex,
+                                                       double timeSec, int maxWidth) {
+    MacPlayerFrameResult result = { .pixels = NULL, .width = 0, .height = 0 };
+    if (!ex || !decodeFrameAt(ex, timeSec))
+        return result;
+
+    AVFrame *frame = ex->frame;
 
     // Calculate output dimensions
     int srcW = frame->width;
@@ -90,53 +123,24 @@ MacPlayerFrameResult macplayer_extract_frame(const char *path, double timeSec, i
         dstH = srcH;
     }
 
-    // Set up scaler to RGBA
-    swsCtx = sws_getContext(srcW, srcH, frame->format,
-                            dstW, dstH, AV_PIX_FMT_RGBA,
-                            SWS_BILINEAR, NULL, NULL, NULL);
-    if (!swsCtx)
-        goto cleanup;
-
-    rgbaFrame = av_frame_alloc();
-    if (!rgbaFrame)
-        goto cleanup;
-
-    int bufSize = av_image_get_buffer_size(AV_PIX_FMT_RGBA, dstW, dstH, 1);
-    if (bufSize < 0)
-        goto cleanup;
-
-    rgbaBuf = (uint8_t *)av_malloc(bufSize);
-    if (!rgbaBuf)
-        goto cleanup;
-
-    av_image_fill_arrays(rgbaFrame->data, rgbaFrame->linesize,
-                         rgbaBuf, AV_PIX_FMT_RGBA, dstW, dstH, 1);
-
-    sws_scale(swsCtx, (const uint8_t *const *)frame->data, frame->linesize,
-              0, srcH, rgbaFrame->data, rgbaFrame->linesize);
-
-    // Copy to caller-owned buffer
-    result.width = dstW;
-    result.height = dstH;
-    result.pixels = (uint8_t *)malloc(bufSize);
-    if (result.pixels) {
-        // Copy row by row in case linesize != dstW*4
+    ex->swsCtx = sws_getCachedContext(ex->swsCtx, srcW, srcH, frame->format,
+                                      dstW, dstH, AV_PIX_FMT_RGBA,
+                                      SWS_BILINEAR, NULL, NULL, NULL);
+    if (ex->swsCtx && dstW > 0 && dstH > 0) {
+        // Scale straight into the caller-owned buffer: tightly packed RGBA rows.
         int rowBytes = dstW * 4;
-        for (int y = 0; y < dstH; y++) {
-            memcpy(result.pixels + y * rowBytes,
-                   rgbaFrame->data[0] + y * rgbaFrame->linesize[0],
-                   rowBytes);
+        uint8_t *pixels = (uint8_t *)malloc((size_t)rowBytes * dstH);
+        if (pixels) {
+            uint8_t *dstData[4] = { pixels, NULL, NULL, NULL };
+            int dstLinesize[4] = { rowBytes, 0, 0, 0 };
+            sws_scale(ex->swsCtx, (const uint8_t *const *)frame->data, frame->linesize,
+                      0, srcH, dstData, dstLinesize);
+            result.pixels = pixels;
+            result.width = dstW;
+            result.height = dstH;
         }
     }
 
-cleanup:
-    if (rgbaBuf)    av_free(rgbaBuf);
-    if (rgbaFrame)  av_frame_free(&rgbaFrame);
-    if (frame)      av_frame_free(&frame);
-    if (pkt)        av_packet_free(&pkt);
-    if (swsCtx)     sws_freeContext(swsCtx);
-    if (codecCtx)   avcodec_free_context(&codecCtx);
-    if (fmtCtx)     avformat_close_input(&fmtCtx);
-
+    av_frame_unref(frame);
     return result;
 }

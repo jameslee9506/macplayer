@@ -1,6 +1,60 @@
 import Foundation
 import AppKit
 
+/// RGBA pixels of one extracted frame, tightly packed (`width * 4` bytes per row).
+private struct RGBAFrame: Sendable {
+    let pixels: Data
+    let width: Int
+    let height: Int
+}
+
+/// Owns an open C frame extractor and closes it when released.
+private final class ExtractorHandle {
+    let raw: OpaquePointer
+
+    init?(path: String) {
+        guard let raw = macplayer_frame_extractor_open(path) else { return nil }
+        self.raw = raw
+    }
+
+    deinit {
+        macplayer_frame_extractor_close(raw)
+    }
+}
+
+/// Holds one video open for frame extraction, so each thumbnail is a seek in an already-open
+/// file. Re-opening per thumbnail repeats the container's whole open cost every time, which
+/// for some layouts means walking the entire file.
+/// The actor serialises access: the C extractor is not thread-safe.
+private actor FrameExtractor {
+    private let path: String
+    private var handle: ExtractorHandle?
+    private var openFailed = false
+
+    init(path: String) {
+        self.path = path
+    }
+
+    func frame(at time: Double, maxWidth: Int32) -> RGBAFrame? {
+        if handle == nil && !openFailed {
+            handle = ExtractorHandle(path: path)
+            openFailed = handle == nil
+        }
+        guard let handle else { return nil }
+
+        let result = macplayer_frame_extractor_extract(handle.raw, time, maxWidth)
+        guard let pixels = result.pixels else { return nil }
+        let width = Int(result.width)
+        let height = Int(result.height)
+        // Data takes ownership of the malloc'd buffer.
+        return RGBAFrame(
+            pixels: Data(bytesNoCopy: pixels, count: width * height * 4, deallocator: .free),
+            width: width,
+            height: height
+        )
+    }
+}
+
 /// Generates thumbnail images from video frames at specific timestamps using ffmpeg C API.
 /// Pre-generates thumbnails at regular intervals on video load for instant access,
 /// and falls back to on-demand generation for uncached times.
@@ -22,8 +76,8 @@ final class ThumbnailGenerator {
     /// Short (<5m): 2s, Medium (5-30m): 5s, Long (30m-2h): 8s, Very long (>2h): 12s
     private var bucketSize: Double = 2.0
 
-    /// Video URL for thumbnail extraction
-    private var videoURL: URL?
+    /// Extractor for the current video; replaced when a new video is set up
+    private var extractor: FrameExtractor?
 
     /// Convert a time in seconds to a cache key based on current bucket size
     private func cacheKey(for time: Double) -> Int {
@@ -47,18 +101,19 @@ final class ThumbnailGenerator {
         pendingKeys.removeAll()
         lastImage = nil
         lastDisplayedKey = -1
-        videoURL = url
+        let extractor = FrameExtractor(path: url.path)
+        self.extractor = extractor
 
         if duration > 0 {
             bucketSize = Self.bucketSize(for: duration)
-            startPregeneration(url: url, duration: duration)
+            startPregeneration(extractor: extractor, duration: duration)
         } else {
             bucketSize = 2.0
         }
     }
 
     /// Pre-generate thumbnails at bucket intervals across the video duration.
-    private func startPregeneration(url: URL, duration: Double) {
+    private func startPregeneration(extractor: FrameExtractor, duration: Double) {
         pregenTask?.cancel()
         let bucket = bucketSize
 
@@ -78,7 +133,7 @@ final class ThumbnailGenerator {
                 let alreadyCached = await MainActor.run { self?.cache[key] != nil }
                 if alreadyCached { continue }
 
-                let image = await Self.generateThumbnail(url: url, time: time)
+                let image = await Self.generateThumbnail(extractor: extractor, time: time)
                 guard !Task.isCancelled else { return }
                 if let image {
                     await MainActor.run { [weak self] in
@@ -120,11 +175,11 @@ final class ThumbnailGenerator {
         }
 
         // Kick off async generation if not already pending
-        if !pendingKeys.contains(key), let url = videoURL {
+        if !pendingKeys.contains(key), let extractor {
             pendingKeys.insert(key)
 
             Task { [weak self] in
-                let image = await Self.generateThumbnail(url: url, time: time)
+                let image = await Self.generateThumbnail(extractor: extractor, time: time)
                 await MainActor.run { [weak self] in
                     if let image {
                         self?.cache[key] = image
@@ -144,33 +199,28 @@ final class ThumbnailGenerator {
 
     /// Generate a single thumbnail via ffmpeg C API at the given time.
     nonisolated private static func generateThumbnail(
-        url: URL, time: Double
+        extractor: FrameExtractor, time: Double
     ) async -> NSImage? {
-        let path = url.path
-        let result = macplayer_extract_frame(path, time, 240)
-
-        guard let pixels = result.pixels else { return nil }
-        defer { free(pixels) }
-
-        let w = Int(result.width)
-        let h = Int(result.height)
-        guard w > 0, h > 0 else { return nil }
-
-        let bytesPerRow = w * 4
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let ctx = CGContext(
-                  data: pixels,
-                  width: w,
-                  height: h,
+        guard let frame = await extractor.frame(at: time, maxWidth: 240),
+              frame.width > 0, frame.height > 0,
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let provider = CGDataProvider(data: frame.pixels as CFData),
+              let cgImage = CGImage(
+                  width: frame.width,
+                  height: frame.height,
                   bitsPerComponent: 8,
-                  bytesPerRow: bytesPerRow,
+                  bitsPerPixel: 32,
+                  bytesPerRow: frame.width * 4,
                   space: colorSpace,
-                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-              ),
-              let cgImage = ctx.makeImage()
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: true,
+                  intent: .defaultIntent
+              )
         else { return nil }
 
-        return NSImage(cgImage: cgImage, size: NSSize(width: w, height: h))
+        return NSImage(cgImage: cgImage, size: NSSize(width: frame.width, height: frame.height))
     }
 
     /// Clear all cached thumbnails.

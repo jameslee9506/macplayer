@@ -6,6 +6,7 @@
 #import <mpv/render_gl.h>
 #pragma clang diagnostic pop
 
+#import "Core/Engine/MP4LayoutProbe.h"
 #import "Features/Thumbnail/FFmpegFrameExtractor.h"
 
 // MARK: - PIPViewController (Private API from PIP.framework)
