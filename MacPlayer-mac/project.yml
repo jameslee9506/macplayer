@@ -1,0 +1,46 @@
+name: MacPlayer
+options:
+  bundleIdPrefix: io.github.jameslee9506.macplayer
+  deploymentTarget:
+    macOS: "15.0"
+  defaultConfig: Debug
+  groupSortPosition: top
+
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+
+targets:
+  MacPlayer:
+    type: application
+    platform: macOS
+    sources:
+      - path: MacPlayer
+        excludes:
+          - "deps/**"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.jameslee9506.macplayer.app
+        PRODUCT_NAME: MacPlayer
+        INFOPLIST_FILE: MacPlayer/Info.plist
+        CODE_SIGN_ENTITLEMENTS: MacPlayer/MacPlayer.entitlements
+        GENERATE_INFOPLIST_FILE: false
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_EMIT_LOC_STRINGS: true
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_OBJC_BRIDGING_HEADER: MacPlayer/MacPlayer-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(PROJECT_DIR)/MacPlayer/deps/include
+        LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/MacPlayer/deps/lib
+        OTHER_LDFLAGS: "-lmpv -lavformat -lavcodec -lswscale -lavutil -weak_framework PIP"
+        FRAMEWORK_SEARCH_PATHS: /System/Library/PrivateFrameworks
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        GCC_PREPROCESSOR_DEFINITIONS: "GL_SILENCE_DEPRECATION=1"
+    postBuildScripts:
+      - script: |
+          mkdir -p "${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}"
+          # Copy all dylibs and framework-style libs (e.g. Python without .dylib extension)
+          for f in "${PROJECT_DIR}/MacPlayer/deps/lib/"*; do
+            [ -f "$f" ] && cp -f "$f" "${BUILT_PRODUCTS_DIR}/${FRAMEWORKS_FOLDER_PATH}/"
+          done
+        name: "Copy mpv dylibs"

@@ -1,0 +1,85 @@
+# Xcode
+*.xcodeproj/
+!*.xcodeproj/project.pbxproj
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+build/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xccheckout
+*.moved-aside
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+Package.resolved
+*.xcodeproj
+
+# mpv dylibs (bundled at build time)
+**/deps/lib/
+**/deps/include/
+
+# Reference code
+iina/
+iina_analysis/
+ffmpeg/
+ffmpeg_analysis/
+mpv/
+
+# Local agent configuration and working notes
+CLAUDE*.md
+AGENTS*.md
+.claude/
+.codex/
+.agents/
+.mcp.json
+docs/
+todo/
+memory/
+MEMORY.md
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+.dev.vars
+.dev.vars.*
+.secrets.local
+.npmrc
+.netrc
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+*.keystore
+
+# Local dependencies and logs
+node_modules/
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# Test data
+testdata/
+
+# Wrangler (Cloudflare)
+.wrangler/
+
+# Generated
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
