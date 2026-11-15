@@ -1,59 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Wrapping Flow Layout
-
-/// A horizontal layout that wraps children to the next line when they exceed the available width.
-private struct WrappingHStack: Layout {
-    var spacing: CGFloat = 4
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let result = layout(subviews: subviews, width: proposal.width ?? .infinity)
-        return result.size
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let result = layout(subviews: subviews, width: bounds.width)
-        for (index, position) in result.positions.enumerated() {
-            subviews[index].place(
-                at: CGPoint(x: bounds.minX + position.x, y: bounds.minY + position.y),
-                proposal: ProposedViewSize(subviews[index].sizeThatFits(.unspecified))
-            )
-        }
-    }
-
-    private struct LayoutResult {
-        var positions: [CGPoint]
-        var size: CGSize
-    }
-
-    private func layout(subviews: Subviews, width: CGFloat) -> LayoutResult {
-        var positions: [CGPoint] = []
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        var maxWidth: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > width, x > 0 {
-                x = 0
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            positions.append(CGPoint(x: x, y: y))
-            rowHeight = max(rowHeight, size.height)
-            x += size.width + spacing
-            maxWidth = max(maxWidth, x - spacing)
-        }
-
-        return LayoutResult(
-            positions: positions,
-            size: CGSize(width: maxWidth, height: y + rowHeight)
-        )
-    }
-}
-
 // MARK: - Dark Thin Scroller
 
 /// Custom NSScroller with a thin, dark-toned knob that blends with the sidebar.
@@ -181,10 +128,12 @@ struct SidePanel: View {
         .preferredColorScheme(.dark)
     }
 
-    // MARK: - Header (tabs, wrap layout)
+    // MARK: - Header (single-row tabs)
 
+    /// One fixed row: the selected tab shows icon + label at its natural width,
+    /// the rest collapse to icons and share the remaining width equally.
     private var header: some View {
-        WrappingHStack(spacing: 4) {
+        HStack(spacing: 4) {
             tabButton("Playlist", icon: "list.bullet", tab: .playlist)
             tabButton("Filters", icon: "slider.horizontal.3", tab: .filters)
             tabButton("Info", icon: "info.circle", tab: .info)
@@ -201,17 +150,24 @@ struct SidePanel: View {
         return Button(action: { selectedTab = tab }) {
             HStack(spacing: 5) {
                 Image(systemName: icon)
-                    .font(.system(size: 10, weight: .medium))
-                Text(title)
                     .font(.system(size: 12, weight: .medium))
+                if isActive {
+                    Text(title)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                        .fixedSize()
+                }
             }
             .foregroundStyle(isActive ? .white : .white.opacity(0.45))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.horizontal, isActive ? 10 : 0)
+            .frame(maxWidth: isActive ? nil : .infinity)
+            .frame(height: 26)
             .contentShape(Rectangle())
             .background(isActive ? .white.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 5))
         }
         .buttonStyle(.plain)
+        .help(title)
+        .accessibilityLabel(title)
     }
 
     // MARK: - Playlist Content
