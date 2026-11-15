@@ -8,23 +8,30 @@ struct PlaybackRecord: Identifiable, Sendable {
     var lastPosition: Double
     var duration: Double
     var lastPlayedAt: Date
+    /// Security-scoped bookmark: lets the sandboxed app read the file again in a later launch.
+    var bookmark: Data?
 
-    init(videoURL: URL, title: String, position: Double, duration: Double) {
+    init(videoURL: URL, title: String, position: Double, duration: Double, bookmark: Data? = nil) {
         self.id = UUID()
         self.videoURL = videoURL
         self.title = title
         self.lastPosition = position
         self.duration = duration
         self.lastPlayedAt = Date()
+        self.bookmark = bookmark
     }
 
-    init(id: UUID, videoURL: URL, title: String, lastPosition: Double, duration: Double, lastPlayedAt: Date) {
+    init(
+        id: UUID, videoURL: URL, title: String, lastPosition: Double, duration: Double,
+        lastPlayedAt: Date, bookmark: Data? = nil
+    ) {
         self.id = id
         self.videoURL = videoURL
         self.title = title
         self.lastPosition = lastPosition
         self.duration = duration
         self.lastPlayedAt = lastPlayedAt
+        self.bookmark = bookmark
     }
 
     var progress: Double {
@@ -43,6 +50,67 @@ final class PlaybackHistoryManager {
 
     init() {
         loadHistory()
+    }
+
+    /// Marks a file as opened just now, so it leads the recent list. Its resume position is kept.
+    ///
+    /// Call while the app can read the file: the bookmark stored here is what lets the sandbox
+    /// reopen it later.
+    func recordOpened(videoURL: URL, title: String) {
+        let now = Date()
+        let bookmark = try? videoURL.bookmarkData(
+            options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+
+        if let index = history.firstIndex(where: { $0.videoURL == videoURL }) {
+            history[index].lastPlayedAt = now
+            if let bookmark { history[index].bookmark = bookmark }
+
+            try? db.execute("""
+                UPDATE playback_history SET last_played_at = ?, bookmark = COALESCE(?, bookmark)
+                WHERE video_url = ?
+            """, parameters: [
+                .real(now.timeIntervalSinceReferenceDate),
+                bookmark.map { .blob($0) } ?? .null,
+                .text(videoURL.absoluteString)
+            ])
+        } else {
+            let record = PlaybackRecord(
+                videoURL: videoURL, title: title, position: 0, duration: 0, bookmark: bookmark
+            )
+            history.insert(record, at: 0)
+
+            try? db.execute("""
+                INSERT OR REPLACE INTO playback_history
+                    (id, video_url, title, last_position, duration, last_played_at, bookmark)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, parameters: [
+                .text(record.id.uuidString),
+                .text(videoURL.absoluteString),
+                .text(title),
+                .real(0), .real(0),
+                .real(now.timeIntervalSinceReferenceDate),
+                bookmark.map { .blob($0) } ?? .null
+            ])
+
+            trimIfNeeded()
+        }
+    }
+
+    /// Resolves the record's bookmark to a security-scoped URL. The caller starts and stops
+    /// access on it. `nil` when there is no bookmark or the file can no longer be found.
+    func securityScopedURL(for record: PlaybackRecord) -> URL? {
+        guard let bookmark = record.bookmark else { return nil }
+        var isStale = false
+        // A stale bookmark still resolves; opening the file records a fresh one.
+        return try? URL(
+            resolvingBookmarkData: bookmark,
+            options: [.withSecurityScope, .withoutUI],
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        )
     }
 
     /// Record or update playback position for a video.
@@ -83,12 +151,15 @@ final class PlaybackHistoryManager {
                 .real(now.timeIntervalSinceReferenceDate)
             ])
 
-            // Trim old entries in memory and DB
-            if history.count > maxHistoryCount {
-                history = Array(history.prefix(maxHistoryCount))
-                trimDatabase()
-            }
+            trimIfNeeded()
         }
+    }
+
+    /// Trim old entries in memory and DB.
+    private func trimIfNeeded() {
+        guard history.count > maxHistoryCount else { return }
+        history = Array(history.prefix(maxHistoryCount))
+        trimDatabase()
     }
 
     /// Get resume position for a video URL.
@@ -136,7 +207,8 @@ final class PlaybackHistoryManager {
                     title: title,
                     lastPosition: row["last_position"]?.realValue ?? 0,
                     duration: row["duration"]?.realValue ?? 0,
-                    lastPlayedAt: Date(timeIntervalSinceReferenceDate: lastPlayedRef)
+                    lastPlayedAt: Date(timeIntervalSinceReferenceDate: lastPlayedRef),
+                    bookmark: row["bookmark"]?.blobValue
                 )
             }
         } catch {

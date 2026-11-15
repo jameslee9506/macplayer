@@ -96,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     keyEquivalent: ""
                 )
                 item.target = self
-                item.representedObject = record.videoURL
+                item.representedObject = record
                 menu.addItem(item)
             }
         }
@@ -105,11 +105,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openRecentFile(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
+        guard let record = sender.representedObject as? PlaybackRecord else { return }
         playerWindowController.showWindow(nil)
-        Task {
-            await engine.load(url: url)
-        }
+        engine.openRecent(record)
     }
 
     // MARK: - Default Player Prompt

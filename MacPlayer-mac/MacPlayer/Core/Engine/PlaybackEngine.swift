@@ -76,6 +76,10 @@ final class PlaybackEngine {
     /// Whether playback has reached the end of the video
     private(set) var isAtEnd = false
 
+    /// Security-scoped URL of a file reopened from the history. Sandbox access to it is held
+    /// for as long as that file stays loaded.
+    private var scopedAccessURL: URL?
+
     init() {
         self.decoder = MPVDecoder()
         self.keyBindings = KeyBindingManager()
@@ -180,6 +184,11 @@ final class PlaybackEngine {
             savePerFileSettings(for: prevURL)
         }
 
+        // Sandbox access held for a file reopened from the history ends once another file replaces it.
+        if scopedAccessURL?.path != url.path {
+            holdScopedAccess(nil)
+        }
+
         state = .loading
         currentURL = url
         mediaTitle = url.deletingPathExtension().lastPathComponent
@@ -198,6 +207,7 @@ final class PlaybackEngine {
 
         do {
             try await decoder.load(url: url)
+            history.recordOpened(videoURL: url, title: mediaTitle)
             // Re-apply volume/mute after decoder is loaded
             decoder.volume = volume
             decoder.isMuted = isMuted
@@ -248,6 +258,7 @@ final class PlaybackEngine {
         duration = 0
         currentTime = 0
         state = .viewingImage
+        history.recordOpened(videoURL: url, title: mediaTitle)
     }
 
     func play() {
@@ -677,7 +688,9 @@ final class PlaybackEngine {
 
     // MARK: - Open File
 
-    func openFile() {
+    /// Shows the open panel. `unreachableURL` is a recent file that could not be reopened
+    /// directly: the panel then starts in its folder and asks for that file.
+    func openFile(reopening unreachableURL: URL? = nil) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [
             .movie, .video, .mpeg4Movie, .quickTimeMovie, .avi,
@@ -685,6 +698,10 @@ final class PlaybackEngine {
         ]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = true
+        if let unreachableURL {
+            panel.directoryURL = unreachableURL.deletingLastPathComponent()
+            panel.message = "Choose \u{201C}\(unreachableURL.lastPathComponent)\u{201D} to open it again."
+        }
 
         guard panel.runModal() == .OK else { return }
 
@@ -733,6 +750,49 @@ final class PlaybackEngine {
         if let firstURL = playlist.play(at: 0) {
             await load(url: firstURL)
         }
+    }
+
+    // MARK: - Recent Files
+
+    /// Reopens a file from the playback history. When it cannot be read any more — the sandbox
+    /// holds no permission for it, or it is gone — the open panel asks for it again.
+    func openRecent(_ record: PlaybackRecord) {
+        Task {
+            if await !reopen(record) {
+                openFile(reopening: record.videoURL)
+            }
+        }
+    }
+
+    private func reopen(_ record: PlaybackRecord) async -> Bool {
+        let scopedURL = history.securityScopedURL(for: record)
+        let hasScopedAccess = scopedURL?.startAccessingSecurityScopedResource() ?? false
+
+        // The bookmark follows a file that was moved or renamed: load it from where it is now.
+        var url = record.videoURL
+        if let scopedURL, scopedURL.path != url.path {
+            url = scopedURL
+        }
+
+        guard FileManager.default.isReadableFile(atPath: url.path) else {
+            if hasScopedAccess { scopedURL?.stopAccessingSecurityScopedResource() }
+            return false
+        }
+
+        // The entry for the old location goes; opening records the new one.
+        if url != record.videoURL {
+            history.removeRecord(record)
+        }
+
+        holdScopedAccess(hasScopedAccess ? scopedURL : nil)
+        await load(url: url)
+        return true
+    }
+
+    /// Replaces the security-scoped URL whose sandbox access is held, releasing the previous one.
+    private func holdScopedAccess(_ url: URL?) {
+        scopedAccessURL?.stopAccessingSecurityScopedResource()
+        scopedAccessURL = url
     }
 
     // MARK: - Rotation

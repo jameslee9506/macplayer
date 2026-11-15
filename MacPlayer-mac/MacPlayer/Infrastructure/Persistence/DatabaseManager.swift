@@ -46,6 +46,12 @@ final class DatabaseManager {
             )
         """)
 
+        // Added later: security-scoped bookmark that lets the sandbox reopen a recent file.
+        let historyColumns = try db.query("PRAGMA table_info(playback_history)")
+        if !historyColumns.contains(where: { $0["name"]?.textValue == "bookmark" }) {
+            try db.execute("ALTER TABLE playback_history ADD COLUMN bookmark BLOB")
+        }
+
         try db.execute("""
             CREATE TABLE IF NOT EXISTS bookmarks (
                 id TEXT PRIMARY KEY,

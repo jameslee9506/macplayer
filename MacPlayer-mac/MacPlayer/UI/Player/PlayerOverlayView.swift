@@ -23,7 +23,7 @@ struct PlayerOverlayView: View {
 
             switch engine.state {
             case .idle, .stopped:
-                idleView
+                StartView(engine: engine, ui: ui)
 
             case .loading:
                 ProgressView("Loading...")
@@ -167,93 +167,5 @@ struct PlayerOverlayView: View {
             // Sidebar toggle button
             sidebarToggleOverlay
         }
-    }
-
-    // MARK: - Idle View
-
-    private var idleView: some View {
-        GeometryReader { geo in
-            let compact = geo.size.height < 360 || geo.size.width < 400
-            let logoSize: CGFloat = compact ? 56 : 96
-            let cornerRadius: CGFloat = compact ? 14 : 22
-
-            VStack(spacing: 0) {
-                Spacer()
-
-                LogoButton(size: logoSize, cornerRadius: cornerRadius)
-
-                // Labels let presses through, so the window can be dragged from anywhere but a button.
-                Text("MacPlayer")
-                    .font(.system(size: compact ? 16 : 20, weight: .bold, design: .rounded))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [.white, .white.opacity(0.4)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .padding(.top, compact ? 6 : 10)
-                    .allowsHitTesting(false)
-
-                Text("Drop a video file here  \u{00B7}  \u{2318}O")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.3))
-                    .padding(.top, compact ? 4 : 6)
-                    .allowsHitTesting(false)
-
-                HStack(spacing: 12) {
-                    idleButton(icon: "folder", label: "Open File") {
-                        engine.openFile()
-                    }
-                    idleButton(icon: "list.bullet", label: "Playlist") {
-                        ui.sidebarTab = ui.sidebarTab == .playlist ? nil : .playlist
-                    }
-                }
-                .padding(.top, compact ? 14 : 24)
-
-                Button {
-                    ui.showShortcutGuide = true
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "keyboard")
-                            .font(.system(size: 10))
-                        Text("Keyboard Shortcuts")
-                            .font(.system(size: 11))
-                    }
-                    .foregroundStyle(.white.opacity(0.4))
-                }
-                .buttonStyle(.plain)
-                .padding(.top, compact ? 8 : 14)
-
-                Spacer()
-
-                if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
-                    Text("v\(version)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.15))
-                        .padding(.bottom, 12)
-                        .allowsHitTesting(false)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    private func idleButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 11, weight: .medium))
-                Text(label)
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .foregroundStyle(.white.opacity(0.7))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(.white.opacity(0.08))
-            .clipShape(Capsule())
-            .overlay(Capsule().strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
-        }
-        .buttonStyle(.plain)
     }
 }
