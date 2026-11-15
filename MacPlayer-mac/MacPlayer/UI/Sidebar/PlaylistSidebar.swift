@@ -376,8 +376,8 @@ struct SidePanel: View {
     // MARK: - Bookmarks Content
 
     private var currentBookmarks: [Bookmark] {
-        guard let url = engine.currentURL else { return [] }
-        return engine.bookmarks.bookmarks(for: url)
+        guard let mediaID = engine.currentMediaID else { return [] }
+        return engine.bookmarks.bookmarks(for: mediaID)
     }
 
     private var bookmarksContent: some View {
@@ -390,8 +390,8 @@ struct SidePanel: View {
                 Spacer()
                 if !currentBookmarks.isEmpty {
                     Button {
-                        if let url = engine.currentURL {
-                            engine.bookmarks.removeAllBookmarks(for: url)
+                        if let mediaID = engine.currentMediaID {
+                            engine.bookmarks.removeAllBookmarks(for: mediaID)
                         }
                     } label: {
                         Text("Clear All")
@@ -451,8 +451,8 @@ struct SidePanel: View {
     // MARK: - Highlights Content
 
     private var currentHighlightSegments: [HighlightSegment] {
-        guard let url = engine.currentURL else { return [] }
-        return engine.highlights.segments(for: url)
+        guard let mediaID = engine.currentMediaID else { return [] }
+        return engine.highlights.segments(for: mediaID)
     }
 
     private var highlightsContent: some View {
@@ -479,8 +479,8 @@ struct SidePanel: View {
                     .buttonStyle(.plain)
 
                     Button {
-                        if let url = engine.currentURL {
-                            engine.highlights.removeAllSegments(for: url)
+                        if let mediaID = engine.currentMediaID {
+                            engine.highlights.removeAllSegments(for: mediaID)
                         }
                     } label: {
                         Text("Clear All")

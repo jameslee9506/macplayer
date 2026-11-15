@@ -9,14 +9,17 @@ final class DatabaseManager {
 
     private init() {}
 
-    /// Open the database, create tables, migrate from UserDefaults, and run TTL cleanup.
+    /// Open the database, bring the schema up to date, migrate from UserDefaults, and run cleanup.
     func setup() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dbDir = appSupport.appendingPathComponent("MacPlayer", isDirectory: true)
-        let dbURL = dbDir.appendingPathComponent("macplayer.db")
+        setup(at: dbDir.appendingPathComponent("macplayer.db"))
+    }
 
+    func setup(at dbURL: URL) {
         do {
             try db.open(at: dbURL)
+            try migrateLegacyTables()
             try createTables()
             migrateFromUserDefaults()
             cleanupExpiredData()
@@ -27,6 +30,8 @@ final class DatabaseManager {
 
     // MARK: - Schema
 
+    /// Everything the player remembers about a file hangs off a `media` row, which stands for
+    /// the content rather than a location: see `MediaIdentityStore`.
     private func createTables() throws {
         try db.execute("""
             CREATE TABLE IF NOT EXISTS schema_info (
@@ -35,10 +40,27 @@ final class DatabaseManager {
             )
         """)
 
+        // `fingerprint` is NULL until the file is first read. `path` is where the content was
+        // last seen, NULL once other content took that path. `bookmark` is the security-scoped
+        // bookmark that lets the sandbox reopen the file in a later launch.
+        try db.execute("""
+            CREATE TABLE IF NOT EXISTS media (
+                id TEXT PRIMARY KEY,
+                fingerprint TEXT UNIQUE,
+                size INTEGER,
+                mtime REAL,
+                path TEXT,
+                bookmark BLOB
+            )
+        """)
+
+        try db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_media_path ON media(path)
+        """)
+
         try db.execute("""
             CREATE TABLE IF NOT EXISTS playback_history (
-                id TEXT PRIMARY KEY,
-                video_url TEXT NOT NULL UNIQUE,
+                media_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 last_position REAL,
                 duration REAL,
@@ -46,16 +68,10 @@ final class DatabaseManager {
             )
         """)
 
-        // Added later: security-scoped bookmark that lets the sandbox reopen a recent file.
-        let historyColumns = try db.query("PRAGMA table_info(playback_history)")
-        if !historyColumns.contains(where: { $0["name"]?.textValue == "bookmark" }) {
-            try db.execute("ALTER TABLE playback_history ADD COLUMN bookmark BLOB")
-        }
-
         try db.execute("""
             CREATE TABLE IF NOT EXISTS bookmarks (
                 id TEXT PRIMARY KEY,
-                video_url TEXT NOT NULL,
+                media_id TEXT NOT NULL,
                 time REAL NOT NULL,
                 name TEXT NOT NULL,
                 created_at REAL NOT NULL,
@@ -64,12 +80,12 @@ final class DatabaseManager {
         """)
 
         try db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_bookmarks_url ON bookmarks(video_url)
+            CREATE INDEX IF NOT EXISTS idx_bookmarks_media ON bookmarks(media_id)
         """)
 
         try db.execute("""
             CREATE TABLE IF NOT EXISTS per_file_settings (
-                file_path TEXT PRIMARY KEY,
+                media_id TEXT PRIMARY KEY,
                 settings_json TEXT NOT NULL,
                 updated_at REAL NOT NULL
             )
@@ -78,7 +94,7 @@ final class DatabaseManager {
         try db.execute("""
             CREATE TABLE IF NOT EXISTS highlights (
                 id TEXT PRIMARY KEY,
-                video_url TEXT NOT NULL,
+                media_id TEXT NOT NULL,
                 start_time REAL NOT NULL,
                 end_time REAL NOT NULL,
                 created_at REAL NOT NULL
@@ -86,8 +102,132 @@ final class DatabaseManager {
         """)
 
         try db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_highlights_url ON highlights(video_url)
+            CREATE INDEX IF NOT EXISTS idx_highlights_media ON highlights(media_id)
         """)
+    }
+
+    /// ID of the media row last seen at `path`, created without a fingerprint when there is none.
+    /// For data that predates fingerprints: the fingerprint is filled in when the file is next opened.
+    private func mediaID(forPath path: String) throws -> String {
+        let rows = try db.query("SELECT id FROM media WHERE path = ? LIMIT 1", parameters: [.text(path)])
+        if let id = rows.first?["id"]?.textValue { return id }
+
+        let id = UUID().uuidString
+        try db.execute("INSERT INTO media (id, path) VALUES (?, ?)", parameters: [.text(id), .text(path)])
+        return id
+    }
+
+    // MARK: - Legacy Tables (keyed by file location)
+
+    /// Tables that used to identify a file by its location, with the column that held it.
+    private static let legacyLocationColumns = [
+        "playback_history": "video_url",
+        "bookmarks": "video_url",
+        "highlights": "video_url",
+        "per_file_settings": "file_path"
+    ]
+
+    /// Rebuilds location-keyed tables around `media`: one row, not yet fingerprinted, per
+    /// location the old tables mention.
+    private func migrateLegacyTables() throws {
+        let legacy = try Self.legacyLocationColumns.filter { table, column in
+            try db.query("PRAGMA table_info(\(table))").contains { $0["name"]?.textValue == column }
+        }.keys
+        guard !legacy.isEmpty else { return }
+
+        try db.transaction {
+            for table in legacy {
+                try db.execute("ALTER TABLE \(table) RENAME TO \(table)_legacy")
+            }
+            try createTables()
+
+            if legacy.contains("playback_history") { try copyLegacyHistory() }
+            if legacy.contains("bookmarks") { try copyLegacyBookmarks() }
+            if legacy.contains("highlights") { try copyLegacyHighlights() }
+            if legacy.contains("per_file_settings") { try copyLegacySettings() }
+
+            for table in legacy {
+                try db.execute("DROP TABLE \(table)_legacy")
+            }
+        }
+        print("[DatabaseManager] Rebuilt \(legacy.sorted().joined(separator: ", ")) around media identities")
+    }
+
+    /// File path behind a stored `file://` URL string.
+    private static func path(fromURLString string: String?) -> String? {
+        guard let string, let url = URL(string: string), url.isFileURL else { return nil }
+        return url.path
+    }
+
+    private func copyLegacyHistory() throws {
+        // Newest first: should two rows name the same file, the recent one is kept.
+        let rows = try db.query("SELECT * FROM playback_history_legacy ORDER BY last_played_at DESC")
+        for row in rows {
+            guard let path = Self.path(fromURLString: row["video_url"]?.textValue),
+                  let title = row["title"]?.textValue,
+                  let lastPlayedAt = row["last_played_at"]?.realValue
+            else { continue }
+
+            let id = try mediaID(forPath: path)
+            if let bookmark = row["bookmark"]?.blobValue {
+                try db.execute(
+                    "UPDATE media SET bookmark = ? WHERE id = ? AND bookmark IS NULL",
+                    parameters: [.blob(bookmark), .text(id)]
+                )
+            }
+            try db.execute("""
+                INSERT OR IGNORE INTO playback_history (media_id, title, last_position, duration, last_played_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, parameters: [
+                .text(id), .text(title),
+                .real(row["last_position"]?.realValue ?? 0),
+                .real(row["duration"]?.realValue ?? 0),
+                .real(lastPlayedAt)
+            ])
+        }
+    }
+
+    private func copyLegacyBookmarks() throws {
+        let urls = try db.query("SELECT DISTINCT video_url FROM bookmarks_legacy")
+        for row in urls {
+            guard let urlString = row["video_url"]?.textValue,
+                  let path = Self.path(fromURLString: urlString)
+            else { continue }
+
+            try db.execute("""
+                INSERT OR IGNORE INTO bookmarks (id, media_id, time, name, created_at, thumbnail_data)
+                SELECT id, ?, time, name, created_at, thumbnail_data FROM bookmarks_legacy WHERE video_url = ?
+            """, parameters: [.text(try mediaID(forPath: path)), .text(urlString)])
+        }
+    }
+
+    private func copyLegacyHighlights() throws {
+        let urls = try db.query("SELECT DISTINCT video_url FROM highlights_legacy")
+        for row in urls {
+            guard let urlString = row["video_url"]?.textValue,
+                  let path = Self.path(fromURLString: urlString)
+            else { continue }
+
+            try db.execute("""
+                INSERT OR IGNORE INTO highlights (id, media_id, start_time, end_time, created_at)
+                SELECT id, ?, start_time, end_time, created_at FROM highlights_legacy WHERE video_url = ?
+            """, parameters: [.text(try mediaID(forPath: path)), .text(urlString)])
+        }
+    }
+
+    private func copyLegacySettings() throws {
+        let rows = try db.query("SELECT * FROM per_file_settings_legacy")
+        for row in rows {
+            guard let path = row["file_path"]?.textValue,
+                  let json = row["settings_json"]?.textValue,
+                  let updatedAt = row["updated_at"]?.realValue
+            else { continue }
+
+            try db.execute("""
+                INSERT OR IGNORE INTO per_file_settings (media_id, settings_json, updated_at)
+                VALUES (?, ?, ?)
+            """, parameters: [.text(try mediaID(forPath: path)), .text(json), .real(updatedAt)])
+        }
     }
 
     // MARK: - TTL Cleanup (90 days)
@@ -107,6 +247,15 @@ final class DatabaseManager {
             if historyDeleted + settingsDeleted > 0 {
                 print("[DatabaseManager] TTL cleanup: \(historyDeleted) history, \(settingsDeleted) settings removed")
             }
+
+            // A media row nothing refers to any more carries no data worth keeping.
+            try db.execute("""
+                DELETE FROM media
+                WHERE id NOT IN (SELECT media_id FROM playback_history)
+                  AND id NOT IN (SELECT media_id FROM bookmarks)
+                  AND id NOT IN (SELECT media_id FROM highlights)
+                  AND id NOT IN (SELECT media_id FROM per_file_settings)
+            """)
         } catch {
             print("[DatabaseManager] TTL cleanup failed: \(error)")
         }
@@ -172,13 +321,12 @@ final class DatabaseManager {
         }
 
         let records = try JSONDecoder().decode([LegacyRecord].self, from: data)
-        for r in records {
+        for r in records where r.videoURL.isFileURL {
             try db.execute("""
-                INSERT OR IGNORE INTO playback_history (id, video_url, title, last_position, duration, last_played_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO playback_history (media_id, title, last_position, duration, last_played_at)
+                VALUES (?, ?, ?, ?, ?)
             """, parameters: [
-                .text(r.id.uuidString),
-                .text(r.videoURL.absoluteString),
+                .text(try mediaID(forPath: r.videoURL.path)),
                 .text(r.title),
                 .real(r.lastPosition),
                 .real(r.duration),
@@ -198,13 +346,13 @@ final class DatabaseManager {
         }
 
         let bookmarks = try JSONDecoder().decode([LegacyBookmark].self, from: data)
-        for b in bookmarks {
+        for b in bookmarks where b.videoURL.isFileURL {
             try db.execute("""
-                INSERT OR IGNORE INTO bookmarks (id, video_url, time, name, created_at, thumbnail_data)
+                INSERT OR IGNORE INTO bookmarks (id, media_id, time, name, created_at, thumbnail_data)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, parameters: [
                 .text(b.id.uuidString),
-                .text(b.videoURL.absoluteString),
+                .text(try mediaID(forPath: b.videoURL.path)),
                 .real(b.time),
                 .text(b.name),
                 .real(b.createdAt.timeIntervalSinceReferenceDate),
@@ -220,9 +368,9 @@ final class DatabaseManager {
             guard let json = try? JSONEncoder().encode(settings),
                   let jsonStr = String(data: json, encoding: .utf8) else { continue }
             try db.execute("""
-                INSERT OR IGNORE INTO per_file_settings (file_path, settings_json, updated_at)
+                INSERT OR IGNORE INTO per_file_settings (media_id, settings_json, updated_at)
                 VALUES (?, ?, ?)
-            """, parameters: [.text(path), .text(jsonStr), .real(now)])
+            """, parameters: [.text(try mediaID(forPath: path)), .text(jsonStr), .real(now)])
         }
     }
 }

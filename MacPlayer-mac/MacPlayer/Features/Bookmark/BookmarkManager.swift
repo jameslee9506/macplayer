@@ -1,34 +1,18 @@
 import Foundation
 
-/// Timestamp bookmark for a video file, optionally with a thumbnail.
+/// Timestamp bookmark in a media, optionally with a thumbnail.
 struct Bookmark: Identifiable, Sendable {
     let id: UUID
-    let videoURL: URL
+    /// ID of the media the bookmark belongs to: see `MediaIdentityStore`.
+    let mediaID: String
     let time: Double
     let name: String
     let createdAt: Date
-    let thumbnailData: Data?
-
-    init(videoURL: URL, time: Double, name: String, thumbnailData: Data? = nil) {
-        self.id = UUID()
-        self.videoURL = videoURL
-        self.time = time
-        self.name = name
-        self.createdAt = Date()
-        self.thumbnailData = thumbnailData
-    }
-
-    init(id: UUID, videoURL: URL, time: Double, name: String, createdAt: Date, thumbnailData: Data?) {
-        self.id = id
-        self.videoURL = videoURL
-        self.time = time
-        self.name = name
-        self.createdAt = createdAt
-        self.thumbnailData = thumbnailData
-    }
+    var thumbnailData: Data?
 }
 
-/// Manages bookmarks for video files with SQLite persistence.
+/// Manages bookmarks with SQLite persistence. They are keyed by media ID, so they follow a
+/// file that was renamed or moved.
 @MainActor
 @Observable
 final class BookmarkManager {
@@ -36,28 +20,30 @@ final class BookmarkManager {
     private var db: SQLiteDatabase { DatabaseManager.shared.db }
 
     init() {
-        loadBookmarks()
+        reload()
     }
 
     // MARK: - CRUD
 
     /// Add a bookmark. Returns the bookmark ID, or `nil` if a duplicate exists within 1 second.
     @discardableResult
-    func addBookmark(videoURL: URL, time: Double, name: String, thumbnailData: Data? = nil) -> UUID? {
+    func addBookmark(mediaID: String, time: Double, name: String, thumbnailData: Data? = nil) -> UUID? {
         let isDuplicate = bookmarks.contains {
-            $0.videoURL == videoURL && abs($0.time - time) < 1.0
+            $0.mediaID == mediaID && abs($0.time - time) < 1.0
         }
         if isDuplicate { return nil }
 
-        let bookmark = Bookmark(videoURL: videoURL, time: time, name: name, thumbnailData: thumbnailData)
+        let bookmark = Bookmark(
+            id: UUID(), mediaID: mediaID, time: time, name: name, createdAt: Date(), thumbnailData: thumbnailData
+        )
         bookmarks.append(bookmark)
 
         try? db.execute("""
-            INSERT INTO bookmarks (id, video_url, time, name, created_at, thumbnail_data)
+            INSERT INTO bookmarks (id, media_id, time, name, created_at, thumbnail_data)
             VALUES (?, ?, ?, ?, ?, ?)
         """, parameters: [
             .text(bookmark.id.uuidString),
-            .text(videoURL.absoluteString),
+            .text(mediaID),
             .real(time),
             .text(name),
             .real(bookmark.createdAt.timeIntervalSinceReferenceDate),
@@ -69,11 +55,7 @@ final class BookmarkManager {
     /// Update thumbnail data for an existing bookmark.
     func updateThumbnail(for bookmarkID: UUID, data: Data) {
         if let idx = bookmarks.firstIndex(where: { $0.id == bookmarkID }) {
-            let old = bookmarks[idx]
-            bookmarks[idx] = Bookmark(
-                id: old.id, videoURL: old.videoURL, time: old.time,
-                name: old.name, createdAt: old.createdAt, thumbnailData: data
-            )
+            bookmarks[idx].thumbnailData = data
         }
         try? db.execute(
             "UPDATE bookmarks SET thumbnail_data = ? WHERE id = ?",
@@ -94,32 +76,32 @@ final class BookmarkManager {
         }
     }
 
-    /// Remove all bookmarks for a specific video.
-    func removeAllBookmarks(for videoURL: URL) {
-        bookmarks.removeAll { $0.videoURL == videoURL }
+    /// Remove all bookmarks of a media.
+    func removeAllBookmarks(for mediaID: String) {
+        bookmarks.removeAll { $0.mediaID == mediaID }
         try? db.execute(
-            "DELETE FROM bookmarks WHERE video_url = ?",
-            parameters: [.text(videoURL.absoluteString)]
+            "DELETE FROM bookmarks WHERE media_id = ?",
+            parameters: [.text(mediaID)]
         )
     }
 
-    /// Get bookmarks for a specific video file.
-    func bookmarks(for videoURL: URL) -> [Bookmark] {
+    /// Bookmarks of a media, sorted by time.
+    func bookmarks(for mediaID: String) -> [Bookmark] {
         bookmarks
-            .filter { $0.videoURL == videoURL }
+            .filter { $0.mediaID == mediaID }
             .sorted { $0.time < $1.time }
     }
 
     // MARK: - Persistence
 
-    private func loadBookmarks() {
+    /// Reads the bookmarks from the database again. Needed after media rows were merged.
+    func reload() {
         guard db.isOpen else { return }
         do {
             let rows = try db.query("SELECT * FROM bookmarks ORDER BY created_at DESC")
             bookmarks = rows.compactMap { row -> Bookmark? in
                 guard let id = row["id"]?.textValue.flatMap(UUID.init),
-                      let urlStr = row["video_url"]?.textValue,
-                      let url = URL(string: urlStr),
+                      let mediaID = row["media_id"]?.textValue,
                       let time = row["time"]?.realValue,
                       let name = row["name"]?.textValue,
                       let createdRef = row["created_at"]?.realValue
@@ -127,7 +109,7 @@ final class BookmarkManager {
 
                 return Bookmark(
                     id: id,
-                    videoURL: url,
+                    mediaID: mediaID,
                     time: time,
                     name: name,
                     createdAt: Date(timeIntervalSinceReferenceDate: createdRef),
@@ -135,7 +117,7 @@ final class BookmarkManager {
                 )
             }
         } catch {
-            print("[BookmarkManager] loadBookmarks failed: \(error)")
+            print("[BookmarkManager] reload failed: \(error)")
         }
     }
 }

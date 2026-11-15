@@ -178,13 +178,13 @@ struct ControlBar: View {
     }
 
     private var currentBookmarkTimes: [Double] {
-        guard let url = engine.currentURL else { return [] }
-        return engine.bookmarks.bookmarks(for: url).map(\.time)
+        guard let mediaID = engine.currentMediaID else { return [] }
+        return engine.bookmarks.bookmarks(for: mediaID).map(\.time)
     }
 
     private var currentHighlightSegments: [(start: Double, end: Double)] {
-        guard let url = engine.currentURL else { return [] }
-        return engine.highlights.segments(for: url).map { (start: $0.startTime, end: $0.endTime) }
+        guard let mediaID = engine.currentMediaID else { return [] }
+        return engine.highlights.segments(for: mediaID).map { (start: $0.startTime, end: $0.endTime) }
     }
 
     private var hasActiveAdjustments: Bool {

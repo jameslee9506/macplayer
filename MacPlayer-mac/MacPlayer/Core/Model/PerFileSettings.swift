@@ -18,52 +18,55 @@ struct PerFileSettings: Codable {
     }
 }
 
-/// Manages per-file settings storage backed by SQLite.
+/// Manages per-file settings storage backed by SQLite. Settings are keyed by media ID, so they
+/// follow a file that was renamed or moved.
 @MainActor
 final class PerFileSettingsStore {
     private var cache: [String: PerFileSettings] = [:]
     private var db: SQLiteDatabase { DatabaseManager.shared.db }
 
     init() {
-        loadAll()
+        reload()
     }
 
-    func settings(for url: URL) -> PerFileSettings {
-        cache[url.path] ?? PerFileSettings()
+    func settings(for mediaID: String) -> PerFileSettings {
+        cache[mediaID] ?? PerFileSettings()
     }
 
-    func save(_ settings: PerFileSettings, for url: URL) {
-        let path = url.path
+    func save(_ settings: PerFileSettings, for mediaID: String) {
         let now = Date().timeIntervalSinceReferenceDate
 
         if settings.isDefault {
-            cache.removeValue(forKey: path)
-            try? db.execute("DELETE FROM per_file_settings WHERE file_path = ?", parameters: [.text(path)])
+            cache.removeValue(forKey: mediaID)
+            try? db.execute("DELETE FROM per_file_settings WHERE media_id = ?", parameters: [.text(mediaID)])
         } else {
-            cache[path] = settings
+            cache[mediaID] = settings
             guard let json = try? JSONEncoder().encode(settings),
                   let jsonStr = String(data: json, encoding: .utf8) else { return }
             try? db.execute("""
-                INSERT OR REPLACE INTO per_file_settings (file_path, settings_json, updated_at)
+                INSERT OR REPLACE INTO per_file_settings (media_id, settings_json, updated_at)
                 VALUES (?, ?, ?)
-            """, parameters: [.text(path), .text(jsonStr), .real(now)])
+            """, parameters: [.text(mediaID), .text(jsonStr), .real(now)])
         }
     }
 
-    private func loadAll() {
+    /// Reads the settings from the database again. Needed after media rows were merged.
+    func reload() {
         guard db.isOpen else { return }
         do {
-            let rows = try db.query("SELECT file_path, settings_json FROM per_file_settings")
+            let rows = try db.query("SELECT media_id, settings_json FROM per_file_settings")
+            var loaded: [String: PerFileSettings] = [:]
             for row in rows {
-                guard let path = row["file_path"]?.textValue,
+                guard let mediaID = row["media_id"]?.textValue,
                       let jsonStr = row["settings_json"]?.textValue,
                       let data = jsonStr.data(using: .utf8),
                       let settings = try? JSONDecoder().decode(PerFileSettings.self, from: data)
                 else { continue }
-                cache[path] = settings
+                loaded[mediaID] = settings
             }
+            cache = loaded
         } catch {
-            print("[PerFileSettingsStore] loadAll failed: \(error)")
+            print("[PerFileSettingsStore] reload failed: \(error)")
         }
     }
 }

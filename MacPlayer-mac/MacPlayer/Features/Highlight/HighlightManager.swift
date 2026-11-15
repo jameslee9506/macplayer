@@ -1,31 +1,17 @@
 import Foundation
 
-/// A highlight segment marking a time range in a video.
+/// A highlight segment marking a time range in a media.
 struct HighlightSegment: Identifiable, Sendable {
     let id: UUID
-    let videoURL: URL
+    /// ID of the media the segment belongs to: see `MediaIdentityStore`.
+    let mediaID: String
     let startTime: Double
     let endTime: Double
     let createdAt: Date
-
-    init(videoURL: URL, startTime: Double, endTime: Double) {
-        self.id = UUID()
-        self.videoURL = videoURL
-        self.startTime = startTime
-        self.endTime = endTime
-        self.createdAt = Date()
-    }
-
-    init(id: UUID, videoURL: URL, startTime: Double, endTime: Double, createdAt: Date) {
-        self.id = id
-        self.videoURL = videoURL
-        self.startTime = startTime
-        self.endTime = endTime
-        self.createdAt = createdAt
-    }
 }
 
-/// Manages highlight segments for videos with SQLite persistence.
+/// Manages highlight segments with SQLite persistence. They are keyed by media ID, so they
+/// follow a file that was renamed or moved.
 /// When enabled, playback jumps between highlight segments, skipping everything else.
 @MainActor
 @Observable
@@ -39,30 +25,32 @@ final class HighlightManager {
     private var db: SQLiteDatabase { DatabaseManager.shared.db }
 
     init() {
-        loadSegments()
+        reload()
     }
 
     // MARK: - CRUD
 
     @discardableResult
-    func addSegment(videoURL: URL, startTime: Double, endTime: Double) -> UUID? {
+    func addSegment(mediaID: String, startTime: Double, endTime: Double) -> UUID? {
         guard endTime > startTime else { return nil }
 
         // Reject duplicates (same start within 0.5s)
         let isDuplicate = segments.contains {
-            $0.videoURL == videoURL && abs($0.startTime - startTime) < 0.5
+            $0.mediaID == mediaID && abs($0.startTime - startTime) < 0.5
         }
         if isDuplicate { return nil }
 
-        let segment = HighlightSegment(videoURL: videoURL, startTime: startTime, endTime: endTime)
+        let segment = HighlightSegment(
+            id: UUID(), mediaID: mediaID, startTime: startTime, endTime: endTime, createdAt: Date()
+        )
         segments.append(segment)
 
         try? db.execute("""
-            INSERT INTO highlights (id, video_url, start_time, end_time, created_at)
+            INSERT INTO highlights (id, media_id, start_time, end_time, created_at)
             VALUES (?, ?, ?, ?, ?)
         """, parameters: [
             .text(segment.id.uuidString),
-            .text(videoURL.absoluteString),
+            .text(mediaID),
             .real(startTime),
             .real(endTime),
             .real(segment.createdAt.timeIntervalSinceReferenceDate)
@@ -75,18 +63,18 @@ final class HighlightManager {
         try? db.execute("DELETE FROM highlights WHERE id = ?", parameters: [.text(segment.id.uuidString)])
     }
 
-    func removeAllSegments(for videoURL: URL) {
-        segments.removeAll { $0.videoURL == videoURL }
+    func removeAllSegments(for mediaID: String) {
+        segments.removeAll { $0.mediaID == mediaID }
         try? db.execute(
-            "DELETE FROM highlights WHERE video_url = ?",
-            parameters: [.text(videoURL.absoluteString)]
+            "DELETE FROM highlights WHERE media_id = ?",
+            parameters: [.text(mediaID)]
         )
     }
 
-    /// Get segments for a specific video, sorted by start time.
-    func segments(for videoURL: URL) -> [HighlightSegment] {
+    /// Segments of a media, sorted by start time.
+    func segments(for mediaID: String) -> [HighlightSegment] {
         segments
-            .filter { $0.videoURL == videoURL }
+            .filter { $0.mediaID == mediaID }
             .sorted { $0.startTime < $1.startTime }
     }
 
@@ -94,8 +82,8 @@ final class HighlightManager {
 
     /// Determine if playback should jump to a different position.
     /// Returns the target time to seek to, or nil if playback should continue normally.
-    func nextTarget(currentTime: Double, videoURL: URL) -> Double? {
-        let sorted = segments(for: videoURL)
+    func nextTarget(currentTime: Double, mediaID: String) -> Double? {
+        let sorted = segments(for: mediaID)
         guard !sorted.isEmpty else { return nil }
 
         // Find which segment we're in (if any)
@@ -126,14 +114,14 @@ final class HighlightManager {
 
     // MARK: - Persistence
 
-    private func loadSegments() {
+    /// Reads the segments from the database again. Needed after media rows were merged.
+    func reload() {
         guard db.isOpen else { return }
         do {
             let rows = try db.query("SELECT * FROM highlights ORDER BY created_at DESC")
             segments = rows.compactMap { row -> HighlightSegment? in
                 guard let id = row["id"]?.textValue.flatMap(UUID.init),
-                      let urlStr = row["video_url"]?.textValue,
-                      let url = URL(string: urlStr),
+                      let mediaID = row["media_id"]?.textValue,
                       let startTime = row["start_time"]?.realValue,
                       let endTime = row["end_time"]?.realValue,
                       let createdRef = row["created_at"]?.realValue
@@ -141,14 +129,14 @@ final class HighlightManager {
 
                 return HighlightSegment(
                     id: id,
-                    videoURL: url,
+                    mediaID: mediaID,
                     startTime: startTime,
                     endTime: endTime,
                     createdAt: Date(timeIntervalSinceReferenceDate: createdRef)
                 )
             }
         } catch {
-            print("[HighlightManager] loadSegments failed: \(error)")
+            print("[HighlightManager] reload failed: \(error)")
         }
     }
 }

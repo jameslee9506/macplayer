@@ -16,6 +16,9 @@ final class PlaybackEngine {
     private(set) var mediaTitle: String = ""
     private(set) var mediaInfo: MediaInfo?
     private(set) var currentURL: URL?
+    /// Identity of the loaded file's content: what its resume position, bookmarks, highlights
+    /// and per-file settings are stored under. `nil` until the file has been identified.
+    private(set) var currentMediaID: String?
     var volume: Float = 1.0 {
         didSet {
             decoder.volume = volume
@@ -69,6 +72,7 @@ final class PlaybackEngine {
 
     private(set) var decoder: MPVDecoder
     let perFileStore: PerFileSettingsStore
+    private let media = MediaIdentityStore()
 
     /// Timer for mpv time/subtitle synchronization (mpv doesn't use copyCurrentPixelBuffer path)
     private var mpvTimeUpdateTimer: Timer?
@@ -92,7 +96,7 @@ final class PlaybackEngine {
 
         // Open database before initializing managers that depend on it
         DatabaseManager.shared.setup()
-        self.history = PlaybackHistoryManager()
+        self.history = PlaybackHistoryManager(media: media)
         self.bookmarks = BookmarkManager()
         self.highlights = HighlightManager()
         self.perFileStore = PerFileSettingsStore()
@@ -127,8 +131,8 @@ final class PlaybackEngine {
             guard let self else { return }
 
             // If highlights mode is on, loop to first segment
-            if self.highlights.isEnabled, let url = self.currentURL {
-                let segs = self.highlights.segments(for: url)
+            if self.highlights.isEnabled, let mediaID = self.currentMediaID {
+                let segs = self.highlights.segments(for: mediaID)
                 if let first = segs.first {
                     Task { await self.seek(to: first.startTime); self.play() }
                     return
@@ -181,8 +185,8 @@ final class PlaybackEngine {
                 }
 
                 // Check highlights
-                if self.highlights.isEnabled, let url = self.currentURL,
-                   let target = self.highlights.nextTarget(currentTime: self.currentTime, videoURL: url) {
+                if self.highlights.isEnabled, let mediaID = self.currentMediaID,
+                   let target = self.highlights.nextTarget(currentTime: self.currentTime, mediaID: mediaID) {
                     Task { await self.seek(to: target) }
                 }
             }
@@ -192,7 +196,12 @@ final class PlaybackEngine {
     // MARK: - Playback Control
 
     /// Loads a file and, when `autoPlay` is set, starts it. Left out, `autoPlay` follows Settings.
-    func load(url: URL, autoPlay: Bool = AppSettings.autoPlayOnOpen.value) async {
+    /// `expectedMediaID` is the media a recent file is reopened as: see `MediaIdentityStore.identify`.
+    func load(
+        url: URL,
+        autoPlay: Bool = AppSettings.autoPlayOnOpen.value,
+        expecting expectedMediaID: String? = nil
+    ) async {
         savePlaybackState()
 
         // Sandbox access held for a file reopened from the history ends once another file replaces it.
@@ -205,15 +214,25 @@ final class PlaybackEngine {
 
         state = .loading
         currentURL = url
+        currentMediaID = nil
         currentTime = 0
         isAtEnd = false
         mediaTitle = url.deletingPathExtension().lastPathComponent
         mediaInfo = nil
         displayedImage = nil
 
+        // Work out which media the file is while it loads: everything stored for it is keyed by that.
+        async let identification = media.identify(url, expecting: expectedMediaID)
+
         // Check if it's an image file
         if let utType = UTType(filenameExtension: url.pathExtension), utType.conforms(to: .image) {
-            loadImage(url: url)
+            let isShown = loadImage(url: url)
+            let identity = await identification
+            guard generation == loadGeneration else { return }
+            adopt(identity)
+            if isShown {
+                history.recordOpened(mediaID: identity.id, url: url, title: mediaTitle)
+            }
             return
         }
 
@@ -228,10 +247,12 @@ final class PlaybackEngine {
 
         do {
             try await decoder.load(url: url)
+            let identity = await identification
             // A newer load() took over while this one was waiting; the player is its to set up.
             guard generation == loadGeneration else { return }
 
-            history.recordOpened(videoURL: url, title: mediaTitle)
+            adopt(identity)
+            history.recordOpened(mediaID: identity.id, url: url, title: mediaTitle)
             // Re-apply volume/mute after decoder is loaded
             decoder.volume = volume
             decoder.isMuted = isMuted
@@ -244,7 +265,7 @@ final class PlaybackEngine {
 
             // Check for resume position
             if AppSettings.resumePlayback.value,
-               let resumePos = history.resumePosition(for: url), resumePos > 5 {
+               let resumePos = history.resumePosition(for: identity.id), resumePos > 5 {
                 state = .paused
                 await seek(to: resumePos)
                 osd.show(.text("Resumed at \(formatTime(resumePos))"))
@@ -259,7 +280,7 @@ final class PlaybackEngine {
             }
 
             // Restore per-file settings (rotation, filters, audio delay)
-            restorePerFileSettings(for: url)
+            restorePerFileSettings(for: identity.id)
 
             mediaInfo = decoder.getMediaInfo()
             if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) {
@@ -280,6 +301,16 @@ final class PlaybackEngine {
         }
     }
 
+    /// Makes `identity` the loaded file's. Rows merged into it were cached under another ID.
+    private func adopt(_ identity: MediaIdentity) {
+        currentMediaID = identity.id
+        if identity.didMerge {
+            bookmarks.reload()
+            highlights.reload()
+            perFileStore.reload()
+        }
+    }
+
     /// Loads the current file again, after an attempt that failed.
     func retryLoad() {
         guard let url = currentURL else { return }
@@ -288,21 +319,22 @@ final class PlaybackEngine {
 
     // MARK: - Image Viewing
 
-    private func loadImage(url: URL) {
+    /// Shows an image file. Returns whether it could be read.
+    private func loadImage(url: URL) -> Bool {
         // The video before it, or one still loading, would otherwise play on under the image.
         decoder.stop()
 
         guard let image = NSImage(contentsOf: url) else {
             state = .error("Failed to load image")
             playbackStateDidChange()
-            return
+            return false
         }
         displayedImage = image
         duration = 0
         currentTime = 0
         state = .viewingImage
         playbackStateDidChange()
-        history.recordOpened(videoURL: url, title: mediaTitle)
+        return true
     }
 
     func play() {
@@ -367,6 +399,7 @@ final class PlaybackEngine {
 
         state = .stopped
         currentURL = nil
+        currentMediaID = nil
         mediaTitle = ""
         mediaInfo = nil
         displayedImage = nil
@@ -406,12 +439,12 @@ final class PlaybackEngine {
     /// actually loaded has anything to store: while loading or after an error, the position
     /// and the adjustments still belong to the file before it.
     func savePlaybackState() {
-        guard let url = currentURL, state.isActive else { return }
+        guard let mediaID = currentMediaID, state.isActive else { return }
         history.recordPosition(
-            videoURL: url, title: mediaTitle,
+            mediaID: mediaID, title: mediaTitle,
             position: currentTime, duration: duration
         )
-        savePerFileSettings(for: url)
+        savePerFileSettings(for: mediaID)
     }
 
     // MARK: - Seeking
@@ -627,11 +660,11 @@ final class PlaybackEngine {
     // MARK: - Bookmarks
 
     func addBookmark(name: String? = nil) {
-        guard let url = currentURL else { return }
+        guard let mediaID = currentMediaID else { return }
         let bookmarkName = name ?? ""
 
         // Duplicate check + insert — no heavy work
-        guard let bookmarkID = bookmarks.addBookmark(videoURL: url, time: currentTime, name: bookmarkName) else {
+        guard let bookmarkID = bookmarks.addBookmark(mediaID: mediaID, time: currentTime, name: bookmarkName) else {
             osd.show(.text("Bookmark already exists"))
             return
         }
@@ -684,8 +717,8 @@ final class PlaybackEngine {
     // MARK: - Bookmark Navigation
 
     func seekToNextBookmark() async {
-        guard let url = currentURL else { return }
-        let marks = bookmarks.bookmarks(for: url)
+        guard let mediaID = currentMediaID else { return }
+        let marks = bookmarks.bookmarks(for: mediaID)
         if let next = marks.first(where: { $0.time > currentTime + 0.5 }) {
             await seek(to: next.time)
             osd.show(.text("\u{25B8} \(next.name)"))
@@ -693,8 +726,8 @@ final class PlaybackEngine {
     }
 
     func seekToPreviousBookmark() async {
-        guard let url = currentURL else { return }
-        let marks = bookmarks.bookmarks(for: url)
+        guard let mediaID = currentMediaID else { return }
+        let marks = bookmarks.bookmarks(for: mediaID)
         if let prev = marks.last(where: { $0.time < currentTime - 0.5 }) {
             await seek(to: prev.time)
             osd.show(.text("\u{25C2} \(prev.name)"))
@@ -723,8 +756,8 @@ final class PlaybackEngine {
     // MARK: - Highlights
 
     func toggleHighlights() {
-        guard let url = currentURL else { return }
-        let segs = highlights.segments(for: url)
+        guard let mediaID = currentMediaID else { return }
+        let segs = highlights.segments(for: mediaID)
         if segs.isEmpty {
             osd.show(.text("No highlights to play"))
             return
@@ -733,7 +766,7 @@ final class PlaybackEngine {
         if highlights.isEnabled {
             osd.show(.text("Highlights ON (\(segs.count) segments)"))
             // Jump to first segment if outside any segment
-            if let target = highlights.nextTarget(currentTime: currentTime, videoURL: url) {
+            if let target = highlights.nextTarget(currentTime: currentTime, mediaID: mediaID) {
                 Task { await seek(to: target) }
             }
         } else {
@@ -747,7 +780,7 @@ final class PlaybackEngine {
     }
 
     func markHighlightEnd() {
-        guard let url = currentURL else { return }
+        guard let mediaID = currentMediaID else { return }
         guard let start = highlights.pendingStart else {
             osd.show(.text("Set highlight start first (Shift+H)"))
             return
@@ -756,7 +789,7 @@ final class PlaybackEngine {
             osd.show(.text("End must be after start"))
             return
         }
-        if highlights.addSegment(videoURL: url, startTime: start, endTime: currentTime) != nil {
+        if highlights.addSegment(mediaID: mediaID, startTime: start, endTime: currentTime) != nil {
             osd.show(.text("Highlight added: \(formatTime(start)) - \(formatTime(currentTime))"))
         } else {
             osd.show(.text("Duplicate highlight"))
@@ -865,14 +898,10 @@ final class PlaybackEngine {
             return false
         }
 
-        // The entry for the old location goes; opening records the new one.
-        if url != record.videoURL {
-            history.removeRecord(record)
-        }
-
         holdScopedAccess(hasScopedAccess ? scopedURL : nil)
         playlist.setCurrent(url)
-        await load(url: url)
+        // The record stays with the file: identifying it moves the record to the new location.
+        await load(url: url, expecting: record.id)
         return true
     }
 
@@ -962,7 +991,7 @@ final class PlaybackEngine {
         setAudioDelay(0)
     }
 
-    private func savePerFileSettings(for url: URL) {
+    private func savePerFileSettings(for mediaID: String) {
         var settings = PerFileSettings()
         settings.rotation = videoRotation
         settings.audioDelay = decoder.audioDelay
@@ -973,11 +1002,11 @@ final class PlaybackEngine {
                 parameters: Dictionary(uniqueKeysWithValues: filter.parameters.map { ($0.id, $0.value) })
             )
         }
-        perFileStore.save(settings, for: url)
+        perFileStore.save(settings, for: mediaID)
     }
 
-    private func restorePerFileSettings(for url: URL) {
-        let settings = perFileStore.settings(for: url)
+    private func restorePerFileSettings(for mediaID: String) {
+        let settings = perFileStore.settings(for: mediaID)
 
         // Restore rotation
         setRotation(settings.rotation)
