@@ -6,13 +6,13 @@ MacPlayer supports a wide range of video and audio formats, subtitles, HDR tone 
 
 ## Build the macOS app
 
-Requires macOS 15 or later, Xcode 16 or later, and Homebrew.
+Requires macOS 26 or later, Xcode 27 or later, and Homebrew.
 
 ```sh
 git clone https://github.com/jameslee9506/macplayer.git
 cd macplayer
-brew install xcodegen mpv ffmpeg
 cd MacPlayer-mac
+brew bundle --file Brewfile
 ./scripts/bundle_dylibs.sh
 xcodegen generate
 open MacPlayer.xcodeproj

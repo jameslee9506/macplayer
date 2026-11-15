@@ -1,0 +1,4 @@
+brew "mpv"
+brew "ffmpeg"
+brew "sqlite"
+brew "xcodegen"

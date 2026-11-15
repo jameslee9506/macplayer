@@ -1,5 +1,5 @@
 import Foundation
-import SQLite3
+import MacPlayerSQLite
 
 /// Lightweight SQLite3 C API wrapper with WAL mode.
 @MainActor

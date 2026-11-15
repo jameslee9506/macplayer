@@ -24,9 +24,9 @@ Package.pins
 Package.resolved
 *.xcodeproj
 
-# mpv dylibs (bundled at build time)
-**/deps/lib/
-**/deps/include/
+# Generated dependency headers, libraries, and version manifests
+**/deps/
+**/.deps-stage-*/
 
 # Reference code
 iina/

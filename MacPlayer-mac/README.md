@@ -24,29 +24,31 @@ A native macOS media player built with Swift and SwiftUI, powered by [mpv/libmpv
 
 ## Requirements
 
-- macOS 15.0 (Sequoia) or later
-- Xcode 16+
+- macOS 26.0 (Tahoe) or later (the bundled Homebrew libraries require macOS 26)
+- Xcode 27+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-- [Homebrew](https://brew.sh/) (for mpv dependency)
+- [Homebrew](https://brew.sh/) (for mpv, FFmpeg, and SQLite)
 
 ## Building from Source
 
 ### 1. Install dependencies
 
 ```bash
-brew install xcodegen mpv ffmpeg
+cd MacPlayer-mac
+brew bundle --file Brewfile
 ```
 
-### 2. Bundle mpv dylibs
+### 2. Bundle libraries
 
-The project bundles mpv and its transitive dependencies as dylibs. Run the bundling script to copy and rewrite rpaths:
+The project bundles mpv, FFmpeg, SQLite, and their transitive dependencies. Run the bundling script to copy the installed headers and libraries:
 
 ```bash
-cd MacPlayer-mac
 ./scripts/bundle_dylibs.sh
 ```
 
-This copies dylibs from Homebrew into `MacPlayer/deps/lib/` and rewrites their install names for app-relative loading.
+The script replaces `MacPlayer/deps/` only after every library has been relocated, ad-hoc signed, and verified. It also generates linker aliases and `deps/manifest.json`, which records exact package versions and library hashes. Xcode copies the libraries into `Contents/Frameworks/MacPlayerDependencies/`, removes stale files from that directory, and saves the manifest as `Contents/Resources/DependencyManifest.json`.
+
+SQLite is imported as `MacPlayerSQLite` using the bundled headers and library, independently of the SQLite version shipped with macOS.
 
 ### 3. Generate Xcode project
 
@@ -63,6 +65,19 @@ xcodebuild -project MacPlayer.xcodeproj -scheme MacPlayer -configuration Debug b
 ```
 
 > **Note:** After any changes to `project.yml`, re-run `xcodegen generate`.
+
+### Updating dependencies
+
+```bash
+brew update
+brew bundle --file Brewfile
+./scripts/bundle_dylibs.sh
+./scripts/bundle_dylibs.sh --verify
+xcodegen generate
+xcodebuild -project MacPlayer.xcodeproj -scheme MacPlayer -configuration Debug clean build
+```
+
+Use a clean build after updating dependencies to remove files from older bundle layouts; upgrading Homebrew alone does not update an existing app bundle. The November 2026 update uses mpv 0.42.0, FFmpeg 9.0.2, libplacebo 7.387.0, libass 0.17.5, OpenSSL 4.1.0, SQLite 3.54.1, and XcodeGen 2.46.0. See the generated manifest for the complete installed versions.
 
 ## Architecture
 
