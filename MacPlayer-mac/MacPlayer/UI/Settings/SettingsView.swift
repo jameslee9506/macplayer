@@ -32,6 +32,7 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.resumePlayback.key) private var resumePlayback = AppSettings.resumePlayback.defaultValue
     @AppStorage(AppSettings.autoPlayOnOpen.key) private var autoPlayOnOpen = AppSettings.autoPlayOnOpen.defaultValue
     @AppStorage(AppSettings.preventSleep.key) private var preventSleep = AppSettings.preventSleep.defaultValue
+    @AppStorage(AppSettings.keepRecentFiles.key) private var keepRecentFiles = AppSettings.keepRecentFiles.defaultValue
 
     var body: some View {
         Form {
@@ -41,6 +42,15 @@ struct GeneralSettingsView: View {
                 Toggle("Prevent sleep during playback", isOn: $preventSleep)
                     // Applies to the file that is playing right now, too.
                     .onChange(of: preventSleep) { engine?.updateSleepPrevention() }
+            }
+
+            Section {
+                // The same switch as the link under the list on the start screen.
+                Toggle("Keep a list of recently played files", isOn: $keepRecentFiles)
+            } header: {
+                Text("Recent Files")
+            } footer: {
+                Text("The list is on the start screen and in the Dock menu. Turned off, it is hidden and the files you play are not added to it. Resume positions are saved either way.")
             }
         }
         .formStyle(.grouped)

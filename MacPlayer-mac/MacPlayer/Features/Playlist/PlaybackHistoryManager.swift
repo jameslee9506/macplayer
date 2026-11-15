@@ -12,6 +12,9 @@ struct PlaybackRecord: Identifiable, Sendable {
     var lastPlayedAt: Date
     /// Security-scoped bookmark: lets the sandboxed app read the file again in a later launch.
     var bookmark: Data?
+    /// Whether the file shows in the recent list. One first played while the list was turned
+    /// off is remembered for its resume position alone.
+    var isListed: Bool
 
     var progress: Double {
         guard duration > 0 else { return 0 }
@@ -37,6 +40,8 @@ final class PlaybackHistoryManager {
 
     /// Marks a file as opened just now, so it leads the recent list. Its resume position is kept.
     ///
+    /// While the list is turned off, a file that is not in it yet stays out of it.
+    ///
     /// Call while the app can read the file: the bookmark stored here is what lets the sandbox
     /// reopen it later.
     func recordOpened(mediaID: String, url: URL, title: String) {
@@ -51,13 +56,17 @@ final class PlaybackHistoryManager {
 
         // The title follows the file name, which may have changed since the last time.
         try? db.execute("""
-            INSERT INTO playback_history (media_id, title, last_position, duration, last_played_at)
-            VALUES (?, ?, 0, 0, ?)
-            ON CONFLICT(media_id) DO UPDATE SET title = excluded.title, last_played_at = excluded.last_played_at
+            INSERT INTO playback_history (media_id, title, last_position, duration, last_played_at, listed)
+            VALUES (?, ?, 0, 0, ?, ?)
+            ON CONFLICT(media_id) DO UPDATE SET
+                title = excluded.title,
+                last_played_at = excluded.last_played_at,
+                listed = MAX(listed, excluded.listed)
         """, parameters: [
             .text(mediaID),
             .text(title),
-            .real(Date().timeIntervalSinceReferenceDate)
+            .real(Date().timeIntervalSinceReferenceDate),
+            .integer(AppSettings.keepRecentFiles.value ? 1 : 0)
         ])
 
         trimDatabase()
@@ -106,13 +115,14 @@ final class PlaybackHistoryManager {
         } else if isResumable {
             // Not in the list: its record was removed while the file was playing.
             try? db.execute("""
-                INSERT OR REPLACE INTO playback_history (media_id, title, last_position, duration, last_played_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO playback_history (media_id, title, last_position, duration, last_played_at, listed)
+                VALUES (?, ?, ?, ?, ?, ?)
             """, parameters: [
                 .text(mediaID),
                 .text(title),
                 .real(position), .real(duration),
-                .real(now.timeIntervalSinceReferenceDate)
+                .real(now.timeIntervalSinceReferenceDate),
+                .integer(AppSettings.keepRecentFiles.value ? 1 : 0)
             ])
 
             trimDatabase()
@@ -125,13 +135,14 @@ final class PlaybackHistoryManager {
         history.first(where: { $0.id == mediaID })?.lastPosition
     }
 
-    /// Get the most recent playback records, sorted by last played date.
+    /// The recent list: the most recently played of the listed records, newest first.
     func recentRecords(limit: Int) -> [PlaybackRecord] {
         Array(
-            history.sorted { $0.lastPlayedAt > $1.lastPlayedAt }.prefix(limit)
+            history.filter(\.isListed).sorted { $0.lastPlayedAt > $1.lastPlayedAt }.prefix(limit)
         )
     }
 
+    /// Forgets every played file, listed or not, and with it where each was left.
     func clearHistory() {
         history.removeAll()
         try? db.execute("DELETE FROM playback_history")
@@ -150,7 +161,8 @@ final class PlaybackHistoryManager {
         guard db.isOpen else { return }
         do {
             let rows = try db.query("""
-                SELECT h.media_id, h.title, h.last_position, h.duration, h.last_played_at, m.path, m.bookmark
+                SELECT h.media_id, h.title, h.last_position, h.duration, h.last_played_at, h.listed,
+                       m.path, m.bookmark
                 FROM playback_history h JOIN media m ON m.id = h.media_id
                 WHERE m.path IS NOT NULL
                 ORDER BY h.last_played_at DESC LIMIT ?
@@ -169,7 +181,8 @@ final class PlaybackHistoryManager {
                     lastPosition: row["last_position"]?.realValue ?? 0,
                     duration: row["duration"]?.realValue ?? 0,
                     lastPlayedAt: Date(timeIntervalSinceReferenceDate: lastPlayedRef),
-                    bookmark: row["bookmark"]?.blobValue
+                    bookmark: row["bookmark"]?.blobValue,
+                    isListed: row["listed"]?.integerValue != 0
                 )
             }
         } catch {

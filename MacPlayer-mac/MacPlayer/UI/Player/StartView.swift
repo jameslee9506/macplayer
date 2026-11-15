@@ -6,9 +6,14 @@ import SwiftUI
 ///
 /// The shortcuts come from the playback history. The playlist is the queue of the current
 /// session and stays in the sidebar, behind its own button.
+///
+/// Under the shortcuts, links clear the list and turn it off. Turned off, a line saying so
+/// stands in for the shortcuts, with the link that turns the list back on.
 struct StartView: View {
     let engine: PlaybackEngine
     @Bindable var ui: PlayerUIState
+
+    @AppStorage(AppSettings.keepRecentFiles.key) private var keepsRecentFiles = AppSettings.keepRecentFiles.defaultValue
 
     private static let maxColumnWidth: CGFloat = 560
     private static let maxRecentCount = 10
@@ -16,14 +21,20 @@ struct StartView: View {
     private static let verticalMargin: CGFloat = 20
     /// Height of everything but the recent rows: heading, buttons, section label, and the gaps between them.
     private static let chromeHeight: CGFloat = 129
+    /// Height the links under the recent rows add, with the gap above them.
+    private static let footerHeight: CGFloat = 28
 
     var body: some View {
         GeometryReader { geo in
             let recents = engine.history.recentRecords(limit: Self.maxRecentCount)
             // Show as many shortcuts as fit; the window can be as short as 270 points.
-            let fittingRows = Int((geo.size.height - Self.chromeHeight - Self.verticalMargin * 2) / RecentRow.height)
-            let visible = recents.prefix(max(0, fittingRows))
-            let contentHeight = Self.chromeHeight + CGFloat(visible.count) * RecentRow.height
+            let rowRoom = geo.size.height - Self.chromeHeight - Self.footerHeight - Self.verticalMargin * 2
+            let fittingRows = max(0, Int(rowRoom / RecentRow.height))
+            let visible = recents.prefix(keepsRecentFiles ? fittingRows : 0)
+            // Turned off, the notice takes the place of the shortcuts: one row.
+            let rowCount = keepsRecentFiles ? visible.count : min(1, fittingRows)
+            let recentHeight = rowCount > 0 ? CGFloat(rowCount) * RecentRow.height + Self.footerHeight : 0
+            let contentHeight = Self.chromeHeight + recentHeight
 
             VStack(alignment: .leading, spacing: 0) {
                 heading
@@ -31,13 +42,13 @@ struct StartView: View {
                 actions
                     .padding(.top, 16)
 
-                if recents.isEmpty {
+                if keepsRecentFiles && recents.isEmpty {
                     Text("Drop a video file here  \u{00B7}  \u{2318}O")
                         .font(.system(size: 13))
                         .foregroundStyle(.white.opacity(0.35))
                         .padding(.top, 26)
                         .allowsHitTesting(false)
-                } else if !visible.isEmpty {
+                } else if rowCount > 0 {
                     Text("Recent")
                         .font(.system(size: 13))
                         .foregroundStyle(.white.opacity(0.55))
@@ -45,12 +56,24 @@ struct StartView: View {
                         .padding(.bottom, 6)
                         .allowsHitTesting(false)
 
-                    ForEach(visible) { record in
-                        RecentRow(record: record, engine: engine)
+                    if keepsRecentFiles {
+                        ForEach(visible) { record in
+                            RecentRow(record: record, engine: engine)
+                        }
+                        // Rows reach past the column by their inset: the text lines up with the heading
+                        // and the hover highlight has room around it.
+                        .padding(.horizontal, -RecentRow.inset)
+                    } else {
+                        Text("Turned off. Files you play are not added to this list.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.white.opacity(0.35))
+                            .lineLimit(1)
+                            .frame(height: RecentRow.height)
+                            .allowsHitTesting(false)
                     }
-                    // Rows reach past the column by their inset: the text lines up with the heading
-                    // and the hover highlight has room around it.
-                    .padding(.horizontal, -RecentRow.inset)
+
+                    // The list kept from before it was turned off can still be cleared.
+                    recentFooter(canClear: !recents.isEmpty)
                 }
             }
             .frame(maxWidth: Self.maxColumnWidth, alignment: .leading)
@@ -77,6 +100,44 @@ struct StartView: View {
             }
         }
         .allowsHitTesting(false)
+    }
+
+    // MARK: - Recent Footer
+
+    /// Links under the recent section: clear the list, and turn it off or back on.
+    private func recentFooter(canClear: Bool) -> some View {
+        HStack(spacing: 7) {
+            if canClear {
+                RecentFooterLink(
+                    title: "Clear Recent",
+                    help: "Forget the files played so far, and where each was left"
+                ) {
+                    engine.history.clearHistory()
+                }
+
+                Text(verbatim: "\u{00B7}")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.25))
+                    .allowsHitTesting(false)
+            }
+
+            if keepsRecentFiles {
+                RecentFooterLink(
+                    title: "Turn Off Recent",
+                    help: "Hide this list and stop adding the files you play to it"
+                ) {
+                    keepsRecentFiles = false
+                }
+            } else {
+                RecentFooterLink(
+                    title: "Turn On Recent",
+                    help: "Show this list and add the files you play to it"
+                ) {
+                    keepsRecentFiles = true
+                }
+            }
+        }
+        .padding(.top, Self.footerHeight - RecentFooterLink.height)
     }
 
     // MARK: - Actions
@@ -229,6 +290,34 @@ private struct RecentRow: View {
             return "~" + folder.dropFirst(homeDirectory.count)
         }
         return folder
+    }
+}
+
+// MARK: - Recent Footer Link
+
+/// Small text link under the recent section: dim until the pointer is over it.
+private struct RecentFooterLink: View {
+    static let height: CGFloat = 20
+
+    let title: LocalizedStringKey
+    let help: LocalizedStringKey
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(isHovered ? 0.8 : 0.4))
+                .lineLimit(1)
+                .frame(height: Self.height)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointerStyle(.link)
+        .onHover { isHovered = $0 }
+        .help(help)
     }
 }
 

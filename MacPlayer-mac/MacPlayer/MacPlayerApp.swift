@@ -83,6 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Dock Menu
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        // The menu is the recent list: turned off, there is nothing to add to the Dock's own items.
+        guard AppSettings.keepRecentFiles.value else { return nil }
+
         let menu = NSMenu()
 
         let recentFiles = engine.history.recentRecords(limit: 10)

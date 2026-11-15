@@ -19,7 +19,7 @@ A native macOS media player built with Swift and SwiftUI, powered by [mpv/libmpv
 - **Video filters** — Real-time brightness, contrast, saturation, sharpen, and deband
 - **Picture-in-Picture** — Native macOS PiP via `PIPViewController`
 - **Playback history** — SQLite-backed history with per-file settings (position, audio delay, rotation, filters)
-- **Recent files** — Start screen and Dock menu shortcuts to recently played files, reopened inside the sandbox through security-scoped bookmarks
+- **Recent files** — Start screen and Dock menu shortcuts to recently played files, reopened inside the sandbox through security-scoped bookmarks. The list can be cleared or turned off from the start screen
 - **Playlist** — Folder scanning, drag-to-reorder, next/previous navigation
 - **System integration** — Now Playing (Control Center), Touch Bar, media keys, sleep prevention
 - **Screenshot capture** — Full-frame PNG capture

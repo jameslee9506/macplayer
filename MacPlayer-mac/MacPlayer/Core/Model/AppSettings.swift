@@ -23,6 +23,9 @@ enum AppSettings {
     static let autoPlayOnOpen = Setting(key: "autoPlayOnOpen", defaultValue: true)
     /// Keep the display awake while a file is playing.
     static let preventSleep = Setting(key: "preventSleep", defaultValue: true)
+    /// Keep the list of recently played files, shown on the start screen and in the Dock menu.
+    /// Off, the list is hidden and the files played meanwhile are left out of it.
+    static let keepRecentFiles = Setting(key: "keepRecentFiles", defaultValue: true)
 
     // MARK: Playback
 

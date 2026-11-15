@@ -66,15 +66,24 @@ final class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_media_path ON media(path)
         """)
 
+        // `listed` is 0 for a file first played while the recent list was turned off: its row
+        // holds the resume position without showing in the list.
         try db.execute("""
             CREATE TABLE IF NOT EXISTS playback_history (
                 media_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 last_position REAL,
                 duration REAL,
-                last_played_at REAL NOT NULL
+                last_played_at REAL NOT NULL,
+                listed INTEGER NOT NULL DEFAULT 1
             )
         """)
+
+        // Added later: every row from before it is in the recent list.
+        let historyColumns = try db.query("PRAGMA table_info(playback_history)")
+        if !historyColumns.contains(where: { $0["name"]?.textValue == "listed" }) {
+            try db.execute("ALTER TABLE playback_history ADD COLUMN listed INTEGER NOT NULL DEFAULT 1")
+        }
 
         try db.execute("""
             CREATE TABLE IF NOT EXISTS bookmarks (
