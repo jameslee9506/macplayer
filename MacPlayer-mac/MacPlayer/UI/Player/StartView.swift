@@ -15,7 +15,7 @@ struct StartView: View {
     private static let horizontalMargin: CGFloat = 24
     private static let verticalMargin: CGFloat = 20
     /// Height of everything but the recent rows: heading, buttons, section label, and the gaps between them.
-    private static let chromeHeight: CGFloat = 117
+    private static let chromeHeight: CGFloat = 129
 
     var body: some View {
         GeometryReader { geo in
@@ -29,7 +29,7 @@ struct StartView: View {
                 heading
 
                 actions
-                    .padding(.top, 14)
+                    .padding(.top, 16)
 
                 if recents.isEmpty {
                     Text("Drop a video file here  \u{00B7}  \u{2318}O")
@@ -67,12 +67,12 @@ struct StartView: View {
     private var heading: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text("MacPlayer")
-                .font(.system(size: 17))
-                .foregroundStyle(.white.opacity(0.8))
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
 
             if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
                 Text("v\(version)")
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.25))
             }
         }
