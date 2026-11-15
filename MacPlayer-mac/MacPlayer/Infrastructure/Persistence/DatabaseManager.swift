@@ -112,6 +112,19 @@ final class DatabaseManager {
         try db.execute("""
             CREATE INDEX IF NOT EXISTS idx_highlights_media ON highlights(media_id)
         """)
+
+        // One row per media and metric: the metric's running totals along the media's timeline,
+        // in bins `bin_width` seconds wide. See `TimelineSeries` and `TimelineStatsStore`.
+        try db.execute("""
+            CREATE TABLE IF NOT EXISTS timeline_stats (
+                media_id TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                bin_width REAL NOT NULL,
+                bins BLOB NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (media_id, metric)
+            )
+        """)
     }
 
     /// ID of the media row last seen at `path`, created without a fingerprint when there is none.
@@ -238,8 +251,13 @@ final class DatabaseManager {
         }
     }
 
-    // MARK: - TTL Cleanup (90 days)
+    // MARK: - Cleanup
 
+    /// Number of media whose timeline statistics are kept: the ones played most recently.
+    private static let maxTimelineStatsMediaCount = 2000
+
+    /// Drops history and settings untouched for 90 days, the timeline statistics of all but
+    /// the most recently played media, and the media rows left with nothing to their name.
     private func cleanupExpiredData() {
         let cutoff = Date().addingTimeInterval(-90 * 24 * 60 * 60).timeIntervalSinceReferenceDate
 
@@ -256,6 +274,17 @@ final class DatabaseManager {
                 print("[DatabaseManager] TTL cleanup: \(historyDeleted) history, \(settingsDeleted) settings removed")
             }
 
+            // Statistics whose media row is gone could never be reached again.
+            try db.execute("DELETE FROM timeline_stats WHERE media_id NOT IN (SELECT id FROM media)")
+
+            // A row never grows, so capping the number of media caps the table.
+            try db.execute("""
+                DELETE FROM timeline_stats WHERE media_id NOT IN (
+                    SELECT media_id FROM timeline_stats
+                    GROUP BY media_id ORDER BY MAX(updated_at) DESC LIMIT ?
+                )
+            """, parameters: [.integer(Int64(Self.maxTimelineStatsMediaCount))])
+
             // A media row nothing refers to any more carries no data worth keeping.
             try db.execute("""
                 DELETE FROM media
@@ -263,6 +292,7 @@ final class DatabaseManager {
                   AND id NOT IN (SELECT media_id FROM bookmarks)
                   AND id NOT IN (SELECT media_id FROM highlights)
                   AND id NOT IN (SELECT media_id FROM per_file_settings)
+                  AND id NOT IN (SELECT media_id FROM timeline_stats)
             """)
         } catch {
             print("[DatabaseManager] TTL cleanup failed: \(error)")

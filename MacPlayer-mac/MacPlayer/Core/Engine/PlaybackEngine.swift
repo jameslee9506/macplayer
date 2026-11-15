@@ -16,8 +16,9 @@ final class PlaybackEngine {
     private(set) var mediaTitle: String = ""
     private(set) var mediaInfo: MediaInfo?
     private(set) var currentURL: URL?
-    /// Identity of the loaded file's content: what its resume position, bookmarks, highlights
-    /// and per-file settings are stored under. `nil` until the file has been identified.
+    /// Identity of the loaded file's content: what its resume position, bookmarks, highlights,
+    /// per-file settings and watch statistics are stored under. `nil` until the file has been
+    /// identified.
     private(set) var currentMediaID: String?
     var volume: Float = 1.0 {
         didSet {
@@ -58,6 +59,7 @@ final class PlaybackEngine {
     let bookmarks: BookmarkManager
     let highlights: HighlightManager
     let history: PlaybackHistoryManager
+    let watchStats = WatchTracker()
     let filters = FilterManager()
     let hdr = HDRManager()
     let nowPlaying = NowPlayingManager()
@@ -170,6 +172,14 @@ final class PlaybackEngine {
                     self.duration = self.decoder.duration
                 }
 
+                // Paused ticks are reported too: that is how the tracker learns playback stopped.
+                self.watchStats.sample(
+                    position: self.decoder.currentTime,
+                    duration: self.duration,
+                    rate: Double(self.playbackRate),
+                    isPlaying: self.state == .playing && !self.isScrubbing
+                )
+
                 guard self.state == .playing else { return }
 
                 self.nowPlaying.updateNowPlayingInfo(
@@ -203,6 +213,8 @@ final class PlaybackEngine {
         expecting expectedMediaID: String? = nil
     ) async {
         savePlaybackState()
+        // Nothing from here on is the previous file being watched.
+        watchStats.end()
 
         // Sandbox access held for a file reopened from the history ends once another file replaces it.
         if scopedAccessURL?.path != url.path {
@@ -261,6 +273,7 @@ final class PlaybackEngine {
             currentTime = decoder.currentTime
             duration = decoder.duration
             playlist.updateCurrentDuration(duration)
+            watchStats.begin(mediaID: identity.id, duration: duration)
 
             // Setup thumbnail generator — pass duration so pre-generation starts immediately
             thumbnails.setup(url: url, duration: duration)
@@ -392,6 +405,7 @@ final class PlaybackEngine {
     /// Unloads the current file and returns to the start screen.
     func stop() {
         savePlaybackState()
+        watchStats.end()
         loadGeneration += 1
         decoder.stop()
         if pip.isActive {
@@ -436,7 +450,8 @@ final class PlaybackEngine {
         decoder.setHardwareDecoding(AppSettings.hardwareDecoding.value)
     }
 
-    /// Stores the resume position and the per-file adjustments of the file being played.
+    /// Stores the resume position, the per-file adjustments and the watch statistics of the
+    /// file being played.
     ///
     /// Runs when the file is left, on every pause, and when the app quits. Only a file that
     /// actually loaded has anything to store: while loading or after an error, the position
@@ -448,6 +463,7 @@ final class PlaybackEngine {
             position: currentTime, duration: duration
         )
         savePerFileSettings(for: mediaID)
+        watchStats.save()
     }
 
     // MARK: - Seeking

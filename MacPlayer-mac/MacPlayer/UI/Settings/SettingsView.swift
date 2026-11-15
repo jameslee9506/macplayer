@@ -109,6 +109,7 @@ struct PlaybackSettingsView: View {
 struct AppearanceSettingsView: View {
     @AppStorage(AppSettings.controlBarOpacity.key) private var controlBarOpacity = AppSettings.controlBarOpacity.defaultValue
     @AppStorage(AppSettings.controlsAutoHideDelay.key) private var controlsAutoHideDelay = AppSettings.controlsAutoHideDelay.defaultValue
+    @AppStorage(AppSettings.showWatchHeatmap.key) private var showWatchHeatmap = AppSettings.showWatchHeatmap.defaultValue
     @AppStorage(AppSettings.osdDuration.key) private var osdDuration = AppSettings.osdDuration.defaultValue
 
     var body: some View {
@@ -129,6 +130,9 @@ struct AppearanceSettingsView: View {
                         .monospacedDigit()
                         .frame(width: 40)
                 }
+
+                // Hides the graph only: what is watched is recorded either way.
+                Toggle("Show watch heatmap above the seek bar", isOn: $showWatchHeatmap)
             }
 
             Section("OSD") {

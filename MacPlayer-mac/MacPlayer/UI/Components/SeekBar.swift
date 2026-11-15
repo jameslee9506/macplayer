@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Custom seek bar with drag-to-seek, click-to-seek, A-B loop markers, and thumbnail preview.
+/// Custom seek bar with drag-to-seek, click-to-seek, A-B loop markers, the watch heatmap, and
+/// thumbnail preview.
 struct SeekBar: View {
     let progress: Double
     let duration: Double
@@ -11,6 +12,7 @@ struct SeekBar: View {
     var loopB: Double? = nil
     var bookmarkTimes: [Double] = []
     var highlightSegments: [(start: Double, end: Double)] = []
+    var watchHeatmap: WatchHeatmap? = nil
     var thumbnailGenerator: ThumbnailGenerator? = nil
 
     @State private var isDragging = false
@@ -111,6 +113,19 @@ struct SeekBar: View {
                 }
             }
             .frame(height: 20)
+            .background(alignment: .top) {
+                // Watch heatmap — stands on the track, behind the markers, and rises with it on hover
+                if let watchHeatmap {
+                    let isActive = isHovering || isDragging
+                    let graphHeight: CGFloat = isActive ? 28 : 18
+                    WatchHeatmapView(heatmap: watchHeatmap)
+                        .frame(height: graphHeight)
+                        .opacity(isActive ? 1 : 0.75)
+                        // `10 - height / 2` is the top edge of the track, centred in the bar's 20 points.
+                        .offset(y: 10 - height / 2 - graphHeight)
+                        .allowsHitTesting(false)
+                }
+            }
             .contentShape(Rectangle())
             .onContinuousHover { phase in
                 switch phase {

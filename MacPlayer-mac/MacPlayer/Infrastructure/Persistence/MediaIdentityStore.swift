@@ -175,8 +175,8 @@ final class MediaIdentityStore {
     }
 
     /// Folds a row that turned out to describe the same content into `targetID`: bookmarks and
-    /// highlights are combined, while the target keeps its own resume position and settings
-    /// when it has them.
+    /// highlights are combined, while the target keeps its own resume position, settings and
+    /// timeline statistics when it has them.
     private func merge(_ row: Row?, into targetID: String) -> Bool {
         guard let row, row.id != targetID else { return false }
         let source: SQLiteValue = .text(row.id)
@@ -186,7 +186,7 @@ final class MediaIdentityStore {
             try db.transaction {
                 try db.execute("UPDATE bookmarks SET media_id = ? WHERE media_id = ?", parameters: [target, source])
                 try db.execute("UPDATE highlights SET media_id = ? WHERE media_id = ?", parameters: [target, source])
-                for table in ["playback_history", "per_file_settings"] {
+                for table in ["playback_history", "per_file_settings", "timeline_stats"] {
                     try db.execute(
                         "UPDATE OR IGNORE \(table) SET media_id = ? WHERE media_id = ?",
                         parameters: [target, source]

@@ -41,6 +41,8 @@ enum AppSettings {
     static let controlBarOpacity = Setting(key: "controlBarOpacity", defaultValue: 0.8)
     /// Seconds the controls stay up after the pointer stops moving during playback.
     static let controlsAutoHideDelay = Setting(key: "controlsAutoHideDelay", defaultValue: 1.5)
+    /// Draw the watch heatmap above the seek bar: which parts of the file were played most.
+    static let showWatchHeatmap = Setting(key: "showWatchHeatmap", defaultValue: true)
     /// Seconds an OSD message stays on screen.
     static let osdDuration = Setting(key: "osdDuration", defaultValue: 1.5)
 }

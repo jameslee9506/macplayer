@@ -14,6 +14,7 @@ A native macOS media player built with Swift and SwiftUI, powered by [mpv/libmpv
 - **Frame-by-frame navigation** — Step forward and backward through individual frames
 - **Customizable keyboard shortcuts** — Fully rebindable key bindings with a visual key recorder
 - **Thumbnail preview** — Seek bar scrubbing with pre-generated thumbnail previews
+- **Watch heatmap** — A graph above the seek bar shows which parts of a video you have played most, built up over every session
 - **Bookmarks** — Timestamp bookmarks with optional screenshot thumbnails, persisted in SQLite
 - **Video filters** — Real-time brightness, contrast, saturation, sharpen, and deband
 - **Picture-in-Picture** — Native macOS PiP via `PIPViewController`
@@ -95,6 +96,7 @@ MacPlayer/
 │   ├── PiP/             # Picture-in-Picture via PIPViewController
 │   ├── Playback/        # A-B loop manager
 │   ├── Playlist/        # Playlist and playback history managers
+│   ├── Stats/           # Watch tracking and the watch heatmap
 │   ├── Subtitle/        # Subtitle configuration (mpv native rendering)
 │   └── Thumbnail/       # Pre-generation and on-demand thumbnail generation
 ├── Infrastructure/

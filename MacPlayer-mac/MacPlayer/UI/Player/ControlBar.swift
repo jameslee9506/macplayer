@@ -6,10 +6,11 @@ struct ControlBar: View {
     @Binding var sidebarTab: SidebarTab?
 
     @AppStorage(AppSettings.controlBarOpacity.key) private var barOpacity = AppSettings.controlBarOpacity.defaultValue
+    @AppStorage(AppSettings.showWatchHeatmap.key) private var showWatchHeatmap = AppSettings.showWatchHeatmap.defaultValue
 
     var body: some View {
         VStack(spacing: 8) {
-            // Seek bar with A-B loop markers and thumbnail preview
+            // Seek bar with A-B loop markers, watch heatmap and thumbnail preview
             SeekBar(
                 progress: engine.progress,
                 duration: engine.duration,
@@ -26,6 +27,7 @@ struct ControlBar: View {
                 loopB: engine.abLoop.pointB,
                 bookmarkTimes: currentBookmarkTimes,
                 highlightSegments: currentHighlightSegments,
+                watchHeatmap: showWatchHeatmap ? engine.watchStats.heatmap : nil,
                 thumbnailGenerator: engine.thumbnails
             )
 
