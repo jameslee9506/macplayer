@@ -220,6 +220,8 @@ final class PlaybackEngine {
         mediaTitle = url.deletingPathExtension().lastPathComponent
         mediaInfo = nil
         displayedImage = nil
+        // The previous file's thumbnails go with it, whether or not this one turns out to load.
+        thumbnails.reset()
 
         // Work out which media the file is while it loads: everything stored for it is keyed by that.
         async let identification = media.identify(url, expecting: expectedMediaID)
@@ -396,6 +398,7 @@ final class PlaybackEngine {
             pip.togglePiP()
         }
         holdScopedAccess(nil)
+        thumbnails.reset()
 
         state = .stopped
         currentURL = nil

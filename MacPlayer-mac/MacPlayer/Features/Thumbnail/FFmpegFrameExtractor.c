@@ -8,6 +8,17 @@
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 
+enum {
+    // How many video packets decodeKeyframeAt() reads past the seek point looking for a
+    // keyframe. Only a container without a keyframe index gets anywhere near it.
+    kMaxPacketsToKeyframe = 1000,
+    // How many times in a row decodeKeyframeAt() may come up empty where plain decoding
+    // gets a frame before the stream is taken to need plain decoding throughout.
+    kMaxKeyframeMisses = 3,
+};
+
+typedef enum { kFrameNone, kFrameDecoded, kFrameUnchanged } FrameOutcome;
+
 struct MacPlayerFrameExtractor {
     AVFormatContext *fmtCtx;
     AVCodecContext *codecCtx;
@@ -15,6 +26,7 @@ struct MacPlayerFrameExtractor {
     AVFrame *frame;
     AVPacket *pkt;
     int videoIdx;
+    int keyframeMisses;          // see kMaxKeyframeMisses
 };
 
 MacPlayerFrameExtractor *macplayer_frame_extractor_open(const char *path) {
@@ -40,6 +52,12 @@ MacPlayerFrameExtractor *macplayer_frame_extractor_open(const char *path) {
     if (ex->videoIdx < 0)
         goto fail;
 
+    // Only video packets are wanted: the demuxer can pass over every other stream's.
+    for (unsigned i = 0; i < ex->fmtCtx->nb_streams; i++) {
+        if ((int)i != ex->videoIdx)
+            ex->fmtCtx->streams[i]->discard = AVDISCARD_ALL;
+    }
+
     AVStream *stream = ex->fmtCtx->streams[ex->videoIdx];
     const AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
     if (!codec)
@@ -50,6 +68,11 @@ MacPlayerFrameExtractor *macplayer_frame_extractor_open(const char *path) {
         goto fail;
     if (avcodec_parameters_to_context(ex->codecCtx, stream->codecpar) < 0)
         goto fail;
+    // A thumbnail is a single frame, so the threads that help are the ones that share out
+    // the work within a frame. FFmpeg's default is one thread, which makes a 4K or 8K
+    // keyframe several times slower than it needs to be.
+    ex->codecCtx->thread_count = 0;     // one per core
+    ex->codecCtx->thread_type = FF_THREAD_SLICE;
     if (avcodec_open2(ex->codecCtx, codec, NULL) < 0)
         goto fail;
 
@@ -76,12 +99,59 @@ void macplayer_frame_extractor_close(MacPlayerFrameExtractor *ex) {
     free(ex);
 }
 
-/// Seek to the keyframe at or before `timeSec` and decode it into `ex->frame`.
-static int decodeFrameAt(MacPlayerFrameExtractor *ex, double timeSec) {
+static void seekTo(MacPlayerFrameExtractor *ex, double timeSec) {
     int64_t ts = (int64_t)(timeSec * AV_TIME_BASE);
     av_seek_frame(ex->fmtCtx, -1, ts, AVSEEK_FLAG_BACKWARD);
-    // Also takes the decoder out of the drained state a previous call may have left it in.
+    // Also takes the decoder out of the drained state a previous call left it in.
     avcodec_flush_buffers(ex->codecCtx);
+}
+
+/// Seeks to `timeSec` and decodes only the keyframe found there into `ex->frame`.
+///
+/// A keyframe decodes on its own, so its packet is the only one read and decoded. Sending
+/// EOF right after it makes the decoder hand the frame over at once; fed normally, a decoder
+/// that reorders frames holds it back until several more have been decoded.
+///
+/// `*keyframe` receives the keyframe's byte offset (-1 if unknown). If that is
+/// `knownKeyframe`, nothing is decoded and the outcome is kFrameUnchanged.
+static FrameOutcome decodeKeyframeAt(MacPlayerFrameExtractor *ex, double timeSec,
+                                     int64_t knownKeyframe, int64_t *keyframe) {
+    seekTo(ex, timeSec);
+
+    // An indexed container lands on the keyframe. One without an index lands mid-GOP, and
+    // the packets up to the next keyframe can't be decoded into anything worth showing.
+    int skipped = 0;
+    while (skipped < kMaxPacketsToKeyframe && av_read_frame(ex->fmtCtx, ex->pkt) >= 0) {
+        if (ex->pkt->stream_index != ex->videoIdx) {
+            av_packet_unref(ex->pkt);
+            continue;
+        }
+        if (!(ex->pkt->flags & AV_PKT_FLAG_KEY)) {
+            av_packet_unref(ex->pkt);
+            skipped++;
+            continue;
+        }
+
+        *keyframe = ex->pkt->pos;
+        if (*keyframe >= 0 && *keyframe == knownKeyframe) {
+            av_packet_unref(ex->pkt);
+            return kFrameUnchanged;
+        }
+        int sent = avcodec_send_packet(ex->codecCtx, ex->pkt);
+        av_packet_unref(ex->pkt);
+        if (sent < 0)
+            return kFrameNone;
+        avcodec_send_packet(ex->codecCtx, NULL);
+        return avcodec_receive_frame(ex->codecCtx, ex->frame) == 0 ? kFrameDecoded : kFrameNone;
+    }
+    return kFrameNone;
+}
+
+/// Seeks to `timeSec` and decodes forward into `ex->frame` until the decoder produces a
+/// frame, however many packets that takes. For the streams decodeKeyframeAt() can't serve:
+/// ones whose keyframes aren't marked, or aren't complete pictures by themselves.
+static int decodeFirstFrameAt(MacPlayerFrameExtractor *ex, double timeSec) {
+    seekTo(ex, timeSec);
 
     while (av_read_frame(ex->fmtCtx, ex->pkt) >= 0) {
         if (ex->pkt->stream_index != ex->videoIdx) {
@@ -102,10 +172,30 @@ static int decodeFrameAt(MacPlayerFrameExtractor *ex, double timeSec) {
 }
 
 MacPlayerFrameResult macplayer_frame_extractor_extract(MacPlayerFrameExtractor *ex,
-                                                       double timeSec, int maxWidth) {
-    MacPlayerFrameResult result = { .pixels = NULL, .width = 0, .height = 0 };
-    if (!ex || !decodeFrameAt(ex, timeSec))
+                                                       double timeSec, int maxWidth,
+                                                       int64_t knownKeyframe) {
+    MacPlayerFrameResult result = { .pixels = NULL, .width = 0, .height = 0,
+                                    .keyframe = -1, .unchanged = 0 };
+    if (!ex)
         return result;
+
+    FrameOutcome outcome = kFrameNone;
+    if (ex->keyframeMisses < kMaxKeyframeMisses) {
+        outcome = decodeKeyframeAt(ex, timeSec, knownKeyframe, &result.keyframe);
+        if (outcome == kFrameUnchanged) {
+            result.unchanged = 1;
+            return result;
+        }
+    }
+    if (outcome == kFrameDecoded) {
+        ex->keyframeMisses = 0;
+    } else {
+        result.keyframe = -1;
+        if (!decodeFirstFrameAt(ex, timeSec))
+            return result;
+        if (ex->keyframeMisses < kMaxKeyframeMisses)
+            ex->keyframeMisses++;
+    }
 
     AVFrame *frame = ex->frame;
 
@@ -140,6 +230,9 @@ MacPlayerFrameResult macplayer_frame_extractor_extract(MacPlayerFrameExtractor *
             result.height = dstH;
         }
     }
+    // Without pixels there is nothing for a later call to be "unchanged" from.
+    if (!result.pixels)
+        result.keyframe = -1;
 
     av_frame_unref(frame);
     return result;
